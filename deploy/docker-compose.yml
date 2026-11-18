@@ -1,0 +1,37 @@
+services:
+  oarc-drop:
+    image: oarc-drop:20261118
+    build: ..
+    container_name: oarc-drop-1
+    user: "1000:1000"
+    restart: always
+    logging:
+      options:
+        max-size: 10m
+        max-file: "3"
+    mem_limit: 128m
+    memswap_limit: 192m
+    environment:
+      LISTEN_ADDR: ":8095"
+      DATA_DIR: "/data"
+      WEB_DIR: "/app/web/dist"
+      S3_ENDPOINT: "http://minio:9000"
+      S3_BUCKET: "aurora"
+      S3_PUBLIC_URL: "https://img.arcueidblog.top"
+      S3_ACCESS_KEY: "${S3_ACCESS_KEY}"
+      S3_SECRET_KEY: "${S3_SECRET_KEY}"
+      SILO_DROP_PREFIX: "aurora/drop/"
+      GDRIVE_REMOTE_DIR: "${GDRIVE_REMOTE_DIR:-}"
+      RCLONE_CONFIG: "/etc/oarc-drop/rclone.conf"
+      REQUIRE_CF_ACCESS: "true"
+      PUBLIC_BASE_URL: "https://drop.arcueidblog.top"
+    volumes:
+      - ./data:/data
+      - ./secrets:/etc/oarc-drop
+    networks:
+      - aurora
+
+networks:
+  aurora:
+    external: true
+    name: aurora_default
