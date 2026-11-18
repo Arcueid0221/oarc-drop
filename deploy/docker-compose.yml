@@ -20,7 +20,7 @@ services:
       S3_PUBLIC_URL: "https://img.arcueidblog.top"
       S3_ACCESS_KEY: "${S3_ACCESS_KEY}"
       S3_SECRET_KEY: "${S3_SECRET_KEY}"
-      SILO_DROP_PREFIX: "aurora/drop/"
+      SILO_DROP_PREFIX: "drop/"
       GDRIVE_REMOTE_DIR: "${GDRIVE_REMOTE_DIR:-}"
       RCLONE_CONFIG: "/etc/oarc-drop/rclone.conf"
       REQUIRE_CF_ACCESS: "true"

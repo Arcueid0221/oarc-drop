@@ -261,7 +261,7 @@ function fmtSec(sec: number): string {
 
       <!-- Bottom: Aligned Full-Width Track List -->
       <div v-if="filteredTracks.length === 0" class="glass-box lib-empty">
-        Silo 桶内暂无音频 · 可在「快传投递」切到 `Silo (aurora/music/)` 上传无损 FLAC 或 MP3
+        Silo 桶内暂无音频 · 可在「快传投递」切到 `Silo (music/audio/)` 上传无损 FLAC 或 MP3
       </div>
 
       <div v-else class="glass-box track-table">

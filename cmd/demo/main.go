@@ -78,10 +78,10 @@ fi
 
 	var mu sync.RWMutex
 	objs := map[string]memObj{
-		"aurora/photos/liquid-aurora.svg":  {data: []byte(svgAurora), ctype: "image/svg+xml"},
-		"aurora/photos/glacier-prism.svg":  {data: []byte(svgGlacier), ctype: "image/svg+xml"},
-		"aurora/music/crystal-prelude.wav": {data: synthChordWAV(6), ctype: "audio/wav"},
-		"aurora/music/crystal-prelude.lrc": {
+		"photos/liquid-aurora.svg":       {data: []byte(svgAurora), ctype: "image/svg+xml"},
+		"photos/glacier-prism.svg":       {data: []byte(svgGlacier), ctype: "image/svg+xml"},
+		"music/audio/crystal-prelude.wav":  {data: synthChordWAV(6), ctype: "audio/wav"},
+		"music/lyrics/crystal-prelude.lrc": {
 			data:  []byte("[00:00.00] 冰晶序曲 · Liquid Glass Demo\n[00:02.00] 切换顶部标签页，音乐不会中断\n[00:04.00] 任意页面按 ⌘V 即可无损粘贴原图或文本\n"),
 			ctype: "text/plain; charset=utf-8",
 		},

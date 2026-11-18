@@ -12,7 +12,7 @@ import UiIcon from './UiIcon.vue'
 const store = useDropStore()
 
 const target = ref<'local' | 'silo' | 'gdrive'>('local')
-const siloPrefix = ref('aurora/drop/')
+const siloPrefix = ref('drop/')
 const ttlHours = ref<number>(168)
 const maxDownloads = ref<number>(0)
 const passcode = ref('')
@@ -147,9 +147,10 @@ onBeforeUnmount(() => document.removeEventListener('mousedown', onDocClick))
           <div class="silo-chips">
             <button
               v-for="pre in [
-                { val: 'aurora/drop/', txt: 'aurora/drop/' },
-                { val: 'aurora/photos/', txt: 'aurora/photos/' },
-                { val: 'aurora/music/', txt: 'aurora/music/' },
+                { val: 'drop/', txt: 'drop/' },
+                { val: 'photos/', txt: 'photos/' },
+                { val: 'music/audio/', txt: 'music/audio/' },
+                { val: 'articles/', txt: 'articles/' },
               ]"
               :key="pre.val"
               type="button"

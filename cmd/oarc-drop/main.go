@@ -63,7 +63,7 @@ func main() {
 	srv := server.New(server.Config{
 		DataDir:         dataDir,
 		S3:              s3c,
-		SiloDropPrefix:  envOr("SILO_DROP_PREFIX", "aurora/drop/"),
+		SiloDropPrefix:  envOr("SILO_DROP_PREFIX", "drop/"),
 		GDriveRemoteDir: strings.TrimSpace(os.Getenv("GDRIVE_REMOTE_DIR")),
 		RcloneBin:       envOr("RCLONE_BIN", "rclone"),
 		RcloneConfig:    strings.TrimSpace(os.Getenv("RCLONE_CONFIG")),

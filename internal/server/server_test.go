@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -167,10 +168,10 @@ func TestEndToEndFlow(t *testing.T) {
 	}
 
 	siloTR := newFakeSiloTransport(t, "aurora", map[string]memObj{
-		"aurora/photos/pic1.jpg":        {data: []byte("full-jpg-bytes"), contentType: "image/jpeg"},
-		"aurora/photos/thumbs/pic1.jpg": {data: []byte("thumb-jpg"), contentType: "image/jpeg"},
-		"aurora/music/theme.mp3":        {data: mp3Bytes, contentType: "audio/mpeg"},
-		"aurora/music/theme.lrc":        {data: []byte("[00:01.00] Hello Moon\n"), contentType: "text/plain"},
+		"photos/pic1.jpg":                         {data: []byte("full-jpg-bytes"), contentType: "image/jpeg"},
+		"photos/thumbs/pic1.jpg":                  {data: []byte("thumb-jpg"), contentType: "image/jpeg"},
+		"music/audio/TYPE-MOON - Tsukihime.mp3":   {data: mp3Bytes, contentType: "audio/mpeg"},
+		"music/lyrics/TYPE-MOON - Tsukihime.lrc":  {data: []byte("[00:01.00] Hello Moon\n"), contentType: "text/plain"},
 	})
 
 	s3c, err := s3client.New(s3client.Config{
@@ -253,8 +254,8 @@ fi
 		t.Fatalf("expected 1 image (thumbs deduplicated) and 1 audio, got img=%d audio=%d", mData.ImageCount, mData.AudioCount)
 	}
 
-	// 3. Track metadata + embedded cover + .lrc lyrics
-	tmResp := doReq(http.MethodGet, "/api/media/track-meta?key=aurora/music/theme.mp3", nil, "", true, nil)
+	// 3. Track metadata + embedded cover + cross-folder .lrc lyrics
+	tmResp := doReq(http.MethodGet, "/api/media/track-meta?key="+url.QueryEscape("music/audio/TYPE-MOON - Tsukihime.mp3"), nil, "", true, nil)
 	var tmData struct {
 		Meta     mediameta.TrackMetadata `json:"meta"`
 		CoverURL string                  `json:"coverUrl"`
@@ -281,7 +282,7 @@ fi
 
 	// 5. Chunked Upload -> Silo target (also updates media index!)
 	siloSong := buildID3MP3Sample("Arcueid Waltz", "O.Arc", "Luminary", fakeCover)
-	sInit := doReq(http.MethodPost, "/api/uploads/init", strings.NewReader(fmt.Sprintf(`{"fileName":"waltz.mp3","size":%d,"target":"silo","siloPrefix":"aurora/music/"}`, len(siloSong))), "application/json", true, nil)
+	sInit := doReq(http.MethodPost, "/api/uploads/init", strings.NewReader(fmt.Sprintf(`{"fileName":"waltz.mp3","size":%d,"target":"silo","siloPrefix":"music/audio/"}`, len(siloSong))), "application/json", true, nil)
 	var sInitRes struct {
 		UploadID string `json:"uploadId"`
 	}

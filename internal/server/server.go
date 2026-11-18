@@ -41,7 +41,7 @@ type HeaderLink struct {
 type Config struct {
 	DataDir           string
 	S3                *s3client.Client
-	SiloDropPrefix    string // default "aurora/drop/"
+	SiloDropPrefix    string // default "drop/"
 	GDriveRemoteDir   string // e.g. "gdrive:OArc-Drop" (empty disables Google Drive target)
 	RcloneBin         string // default "rclone"
 	RcloneConfig      string // optional path to rclone.conf
@@ -90,7 +90,7 @@ type Server struct {
 
 func New(cfg Config, st *store.Store) *Server {
 	if cfg.SiloDropPrefix == "" {
-		cfg.SiloDropPrefix = "aurora/drop/"
+		cfg.SiloDropPrefix = "drop/"
 	}
 	if !strings.HasSuffix(cfg.SiloDropPrefix, "/") {
 		cfg.SiloDropPrefix += "/"
@@ -826,6 +826,7 @@ func (s *Server) ensureMediaIndex(ctx context.Context, force bool) ([]MediaItem,
 
 	thumbSet := make(map[string]struct{})
 	lrcByStem := make(map[string]string)
+	lrcByBaseStem := make(map[string]string)
 	for _, o := range objs {
 		if strings.Contains(o.Key, "/thumbs/") || strings.HasPrefix(o.Key, "thumbs/") {
 			thumbSet[o.Key] = struct{}{}
@@ -834,6 +835,10 @@ func (s *Server) ensureMediaIndex(ctx context.Context, force bool) ([]MediaItem,
 		if strings.EqualFold(path.Ext(o.Key), ".lrc") {
 			stem := strings.TrimSuffix(o.Key, path.Ext(o.Key))
 			lrcByStem[stem] = o.Key
+			baseStem := strings.TrimSuffix(path.Base(o.Key), path.Ext(o.Key))
+			if _, exists := lrcByBaseStem[baseStem]; !exists || strings.HasPrefix(o.Key, "music/lyrics/") {
+				lrcByBaseStem[baseStem] = o.Key
+			}
 		}
 	}
 
@@ -877,7 +882,11 @@ func (s *Server) ensureMediaIndex(ctx context.Context, force bool) ([]MediaItem,
 			}
 		} else if kind == "audio" {
 			stem := strings.TrimSuffix(o.Key, path.Ext(o.Key))
+			baseStem := strings.TrimSuffix(name, path.Ext(name))
 			if lk, ok := lrcByStem[stem]; ok {
+				item.LyricsKey = lk
+				newLrcMap[o.Key] = lk
+			} else if lk, ok := lrcByBaseStem[baseStem]; ok {
 				item.LyricsKey = lk
 				newLrcMap[o.Key] = lk
 			}
