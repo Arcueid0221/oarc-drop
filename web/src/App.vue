@@ -64,6 +64,10 @@ function applyTheme(val: 'light' | 'dark') {
   theme.value = val
   document.documentElement.setAttribute('data-theme', val)
   localStorage.setItem('oarc_drop_theme', val)
+  const metaTheme = document.getElementById('oarc-theme-color')
+  if (metaTheme) {
+    metaTheme.setAttribute('content', val === 'dark' ? '#08090b' : '#e8eaef')
+  }
 }
 
 function toggleTheme() {
@@ -430,7 +434,11 @@ onBeforeUnmount(() => {
   position: relative;
   z-index: 1;
   height: 100dvh;
-  padding: 14px;
+  padding:
+    max(14px, env(safe-area-inset-top, 0px))
+    max(14px, env(safe-area-inset-right, 0px))
+    max(14px, env(safe-area-inset-bottom, 0px))
+    max(14px, env(safe-area-inset-left, 0px));
   display: flex;
   justify-content: center;
   align-items: stretch;
@@ -885,7 +893,11 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: calc(10px + env(safe-area-inset-top, 0px)) 16px 10px;
+    padding:
+      max(10px, calc(env(safe-area-inset-top, 0px) + 6px))
+      calc(16px + env(safe-area-inset-right, 0px))
+      10px
+      calc(16px + env(safe-area-inset-left, 0px));
     background: var(--bg-window);
     -webkit-backdrop-filter: blur(24px) saturate(185%);
     backdrop-filter: blur(24px) saturate(185%);
@@ -918,6 +930,8 @@ onBeforeUnmount(() => {
     background: transparent;
     height: auto;
     overflow: visible;
+    padding-left: env(safe-area-inset-left, 0px);
+    padding-right: env(safe-area-inset-right, 0px);
   }
 
   .macos-canvas.is-locked-pane {
@@ -930,9 +944,9 @@ onBeforeUnmount(() => {
 
   .mobile-bottom-stack {
     position: fixed;
-    left: 12px;
-    right: 12px;
-    bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+    left: calc(12px + env(safe-area-inset-left, 0px));
+    right: calc(12px + env(safe-area-inset-right, 0px));
+    bottom: max(10px, calc(env(safe-area-inset-bottom, 0px) + 4px));
     z-index: 55;
     display: flex;
     flex-direction: column;
@@ -1038,9 +1052,9 @@ onBeforeUnmount(() => {
 
 @media (max-width: 860px) {
   .toast-anchor {
-    top: calc(56px + env(safe-area-inset-top, 0px));
-    left: 16px;
-    right: 16px;
+    top: calc(58px + env(safe-area-inset-top, 0px));
+    left: calc(16px + env(safe-area-inset-left, 0px));
+    right: calc(16px + env(safe-area-inset-right, 0px));
     display: flex;
     justify-content: center;
   }

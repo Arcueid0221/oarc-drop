@@ -1,7 +1,10 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -177,7 +180,11 @@ func (s *Server) handleListSiloObjects(w http.ResponseWriter, r *http.Request) {
 	items := make([]VaultObject, 0, len(objs))
 	folderCounts := make(map[string]int)
 	for _, o := range objs {
-		if o.Size == 0 && strings.HasSuffix(o.Key, "/") {
+		if strings.HasSuffix(o.Key, "/") {
+			dir := strings.Trim(o.Key, "/")
+			if dir != "" && !strings.Contains(dir, "/thumbs") && !strings.HasPrefix(dir, "thumbs") {
+				folderCounts[dir] += 0
+			}
 			continue
 		}
 		if !includeThumbs && (strings.Contains(o.Key, "/thumbs/") || strings.HasPrefix(o.Key, "thumbs/")) {
@@ -188,6 +195,13 @@ func (s *Server) handleListSiloObjects(w http.ResponseWriter, r *http.Request) {
 			dir = "/"
 		}
 		name := path.Base(o.Key)
+		// `.keep` is an empty-folder marker created by POST /api/silo/folders — register its directory without listing it as a file!
+		if name == ".keep" {
+			if dir != "/" {
+				folderCounts[dir] += 0
+			}
+			continue
+		}
 		ext := strings.TrimPrefix(path.Ext(name), ".")
 		kind := classifyAnyExt(ext)
 		streamURL := "/api/media/stream?key=" + url.QueryEscape(o.Key)
@@ -234,6 +248,136 @@ func (s *Server) handleListSiloObjects(w http.ResponseWriter, r *http.Request) {
 		"items":   items,
 		"folders": folders,
 	})
+}
+
+func cleanSiloSubfolder(raw string) (string, bool) {
+	p := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	p = strings.Trim(p, "/")
+	if p == "" || strings.Contains(p, "..") {
+		return "", false
+	}
+	for _, r := range p {
+		if r < 32 || r == ':' || r == '*' || r == '?' || r == '"' || r == '<' || r == '>' || r == '|' {
+			return "", false
+		}
+	}
+	cleaned := path.Clean(p)
+	if cleaned == "." || cleaned == "/" || strings.HasPrefix(cleaned, "..") {
+		return "", false
+	}
+	if cleaned == "thumbs" || strings.HasSuffix(cleaned, "/thumbs") || strings.Contains(cleaned, "/thumbs/") {
+		return "", false
+	}
+	return cleaned, true
+}
+
+func isProtectedSiloFolder(folder string) bool {
+	clean := strings.Trim(folder, "/")
+	if clean == "" {
+		return true
+	}
+	return isProtectedSiloKey(clean + "/")
+}
+
+// POST /api/silo/folders — creates a persistent Silo folder via a 0-byte `.keep` marker.
+func (s *Server) handleCreateSiloFolder(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.S3 == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Silo 未连接"})
+		return
+	}
+	var req struct {
+		Folder string `json:"folder"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	clean, ok := cleanSiloSubfolder(req.Folder)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的文件夹路径"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	markerKey := clean + "/.keep"
+	if err := s.cfg.S3.PutObject(ctx, markerKey, bytes.NewReader(nil), 0, "application/x-directory", ""); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "创建 Silo 文件夹失败: " + err.Error()})
+		return
+	}
+	s.broadcast("media.refresh", map[string]string{"folder": clean})
+	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "folder": clean})
+}
+
+// DELETE /api/silo/folders?folder=...&force=0
+// Blocks deleting protected blog/music directories entirely; requires force=1 if non-empty.
+func (s *Server) handleDeleteSiloFolder(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.S3 == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Silo 未连接"})
+		return
+	}
+	clean, ok := cleanSiloSubfolder(r.URL.Query().Get("folder"))
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的文件夹路径"})
+		return
+	}
+	if isProtectedSiloFolder(clean) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "博客与音乐核心目录禁止整文件夹删除"})
+		return
+	}
+	force := r.URL.Query().Get("force") == "1"
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+
+	prefix := clean + "/"
+	objs, err := s.cfg.S3.ListAll(ctx, prefix)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "查询目录对象失败: " + err.Error()})
+		return
+	}
+	var realCount int
+	var totalBytes int64
+	for _, o := range objs {
+		if strings.HasSuffix(o.Key, "/") || path.Base(o.Key) == ".keep" {
+			continue
+		}
+		realCount++
+		totalBytes += o.Size
+	}
+	if realCount > 0 && !force {
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":      "文件夹非空",
+			"nonEmpty":   true,
+			"fileCount":  realCount,
+			"totalBytes": totalBytes,
+		})
+		return
+	}
+
+	for _, o := range objs {
+		if err := s.cfg.S3.DeleteObject(ctx, o.Key); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "删除目录对象失败: " + err.Error()})
+			return
+		}
+		if !strings.HasSuffix(o.Key, "/") && path.Base(o.Key) != ".keep" {
+			s.evictTrackCache(o.Key)
+			updatedClips, deletedClipIDs, deletedShareCodes := s.store.SyncSiloDelete(o.Key)
+			for _, c := range updatedClips {
+				s.broadcast("clip.updated", c)
+			}
+			for _, cid := range deletedClipIDs {
+				s.broadcast("clip.deleted", map[string]string{"id": cid})
+			}
+			for _, code := range deletedShareCodes {
+				s.broadcast("share.deleted", map[string]string{"code": code})
+			}
+		}
+	}
+	// Also clean up a bare zero-byte folder key if any S3 client created one without trailing slash
+	_ = s.cfg.S3.DeleteObject(ctx, prefix)
+
+	s.invalidateMediaCache()
+	s.broadcast("media.refresh", map[string]string{"deletedFolder": clean})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deletedCount": realCount})
 }
 
 // POST /api/silo/rename
@@ -806,6 +950,71 @@ func (s *Server) handleCreateGDriveFolder(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "folder": sub})
 }
 
+// DELETE /api/gdrive/folders?folder=...&force=0 — deletes a subfolder inside OArc-Drop/ (never root or backup repo!)
+func (s *Server) handleDeleteGDriveFolder(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.GDriveRemoteDir == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Google Drive 未启用"})
+		return
+	}
+	sub, ok := cleanDriveSubfolder(r.URL.Query().Get("folder"))
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的文件夹路径（根目录不可删除）"})
+		return
+	}
+	force := r.URL.Query().Get("force") == "1"
+	remoteDir := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + sub
+
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+
+	lsCmd := exec.CommandContext(ctx, s.cfg.RcloneBin, s.rcloneArgs("lsjson", remoteDir, "--recursive", "--files-only")...)
+	lsOut, lsErr := lsCmd.CombinedOutput()
+	var innerFiles []struct {
+		Path string `json:"Path"`
+		Size int64  `json:"Size"`
+	}
+	if lsErr == nil {
+		_ = json.Unmarshal(lsOut, &innerFiles)
+	}
+	if len(innerFiles) > 0 && !force {
+		var totalBytes int64
+		for _, f := range innerFiles {
+			totalBytes += f.Size
+		}
+		writeJSON(w, http.StatusConflict, map[string]any{
+			"error":      "文件夹非空",
+			"nonEmpty":   true,
+			"fileCount":  len(innerFiles),
+			"totalBytes": totalBytes,
+		})
+		return
+	}
+
+	purgeCmd := exec.CommandContext(ctx, s.cfg.RcloneBin, s.rcloneArgs("purge", remoteDir)...)
+	if out, err := purgeCmd.CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if !strings.Contains(strings.ToLower(msg), "not found") {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "删除 Drive 文件夹失败: " + msg})
+			return
+		}
+	}
+
+	for _, f := range innerFiles {
+		relPath := sub + "/" + strings.TrimLeft(f.Path, "/")
+		updatedClips, deletedClipIDs, deletedShareCodes := s.store.SyncGDriveDelete(relPath)
+		for _, c := range updatedClips {
+			s.broadcast("clip.updated", c)
+		}
+		for _, cid := range deletedClipIDs {
+			s.broadcast("clip.deleted", map[string]string{"id": cid})
+		}
+		for _, code := range deletedShareCodes {
+			s.broadcast("share.deleted", map[string]string{"code": code})
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deletedCount": len(innerFiles)})
+}
+
 // materializeClipLocalPath resolves a local file path for a stored clip so server-side transfers
 // (e.g. local -> Silo or local -> Google Drive) require zero browser re-upload.
 func (s *Server) materializeClipLocalPath(ctx context.Context, c *store.ClipItem) (string, func(), error) {
@@ -1023,4 +1232,456 @@ func (s *Server) handleArchiveClipToGDrive(w http.ResponseWriter, r *http.Reques
 	}
 	s.broadcast("clip.updated", updated)
 	writeJSON(w, http.StatusOK, updated)
+}
+
+// POST /api/vault/copy — copies or moves (`move: true`) any Vault file across or within storage pools
+// (silo <-> gdrive <-> local) directly on the server into a chosen target folder, with collision-safe naming.
+func (s *Server) handleCopyVaultItem(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SrcStorage string `json:"srcStorage"` // "silo" | "gdrive" | "local"
+		SrcKey     string `json:"srcKey"`     // S3 key, Drive rel path, or local clip ID
+		DstStorage string `json:"dstStorage"` // "silo" | "gdrive" | "local"
+		DstFolder  string `json:"dstFolder"`  // e.g. "images/memes", "/", "2026-11", ""
+		Move       bool   `json:"move"`       // when true, deletes source after destination write succeeds
+		Force      bool   `json:"force"`      // required when moving out of a protected Silo blog folder
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8192)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	req.SrcKey = strings.TrimSpace(req.SrcKey)
+	if req.SrcKey == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing srcKey"})
+		return
+	}
+	if req.Move && req.SrcStorage == "silo" {
+		srcClean := strings.TrimLeft(req.SrcKey, "/")
+		if isProtectedSiloKey(srcClean) && !req.Force {
+			writeJSON(w, http.StatusForbidden, map[string]string{"error": "该文件位于博客生产保护目录，移动会导致原地址失效，需确认强制移动"})
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Minute)
+	defer cancel()
+
+	broadcastMoveSync := func(srcKeyClean, dstKey, pubURL string) {
+		upClips, upShares := s.store.SyncVaultMove(req.SrcStorage, srcKeyClean, req.DstStorage, dstKey, pubURL)
+		for _, c := range upClips {
+			s.broadcast("clip.updated", c)
+		}
+		for _, sh := range upShares {
+			s.broadcast("share.updated", sh)
+		}
+	}
+
+	// Fast path 1: Silo -> Silo server-side S3 CopyObject (+ DeleteObject when Move=true)
+	if req.SrcStorage == "silo" && req.DstStorage == "silo" {
+		if s.cfg.S3 == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Silo 未连接"})
+			return
+		}
+		srcClean := strings.TrimLeft(req.SrcKey, "/")
+		prefix := "images/"
+		if cleanDst, ok := cleanSiloSubfolder(req.DstFolder); ok {
+			prefix = cleanDst + "/"
+		}
+		// No-op guard: moving into the exact same Silo directory keeps the file untouched!
+		if req.Move && strings.TrimSuffix(prefix, "/") == path.Dir(srcClean) {
+			pubURL := s.cfg.S3.PublicObjectURL(srcClean)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":         true,
+				"dstStorage": "silo",
+				"dstKey":     srcClean,
+				"fileName":   path.Base(srcClean),
+				"publicUrl":  pubURL,
+			})
+			return
+		}
+		dstKey := s.resolveCleanSiloKey(ctx, prefix, path.Base(srcClean))
+		if err := s.cfg.S3.CopyObject(ctx, srcClean, dstKey); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Silo 内部复制失败: " + err.Error()})
+			return
+		}
+		pubURL := s.cfg.S3.PublicObjectURL(dstKey)
+		if req.Move {
+			_ = s.cfg.S3.DeleteObject(ctx, srcClean)
+			s.evictTrackCache(srcClean)
+			broadcastMoveSync(srcClean, dstKey, pubURL)
+		}
+		s.invalidateMediaCache()
+		s.broadcast("media.refresh", map[string]string{"key": dstKey})
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"ok":         true,
+			"dstStorage": "silo",
+			"dstKey":     dstKey,
+			"fileName":   path.Base(dstKey),
+			"publicUrl":  pubURL,
+		})
+		return
+	}
+
+	// Fast path 2: Google Drive -> Google Drive server-side rclone moveto / copyto
+	if req.SrcStorage == "gdrive" && req.DstStorage == "gdrive" {
+		if s.cfg.GDriveRemoteDir == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Google Drive 未启用"})
+			return
+		}
+		srcRel, ok := cleanRelDrivePath(req.SrcKey)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的 Drive 源路径"})
+			return
+		}
+		var dirRel string
+		rawFolder := strings.TrimSpace(req.DstFolder)
+		if rawFolder != "" && rawFolder != "/" && rawFolder != "." {
+			sub, sOk := cleanDriveSubfolder(rawFolder)
+			if !sOk {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的 Google Drive 目标文件夹"})
+				return
+			}
+			dirRel = sub
+		}
+		srcDir := path.Dir(srcRel)
+		if srcDir == "." {
+			srcDir = ""
+		}
+		if req.Move && srcDir == dirRel {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":         true,
+				"dstStorage": "gdrive",
+				"dstKey":     srcRel,
+				"fileName":   path.Base(srcRel),
+			})
+			return
+		}
+		dstRel := s.resolveCleanDriveRelKey(ctx, dirRel, path.Base(srcRel))
+		remoteBase := strings.TrimRight(s.cfg.GDriveRemoteDir, "/")
+		subcmd := "copyto"
+		if req.Move {
+			subcmd = "moveto"
+		}
+		cmd := exec.CommandContext(ctx, s.cfg.RcloneBin, s.rcloneArgs(subcmd, remoteBase+"/"+srcRel, remoteBase+"/"+dstRel)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "Drive 传输失败: " + strings.TrimSpace(string(out))})
+			return
+		}
+		if req.Move {
+			broadcastMoveSync(srcRel, dstRel, "")
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"ok":         true,
+			"dstStorage": "gdrive",
+			"dstKey":     dstRel,
+			"fileName":   path.Base(dstRel),
+		})
+		return
+	}
+
+	// No-op guard: local -> local move
+	if req.Move && req.SrcStorage == "local" && req.DstStorage == "local" {
+		if c, err := s.store.GetClip(req.SrcKey); err == nil {
+			writeJSON(w, http.StatusOK, map[string]any{
+				"ok":         true,
+				"dstStorage": "local",
+				"dstKey":     c.ID,
+				"fileName":   c.FileName,
+				"clip":       c,
+			})
+			return
+		}
+	}
+
+	// Materialize source file onto local disk (or reuse existing local clip path)
+	var srcLocalPath string
+	var srcFileName string
+	var srcMime string
+	cleanup := func() {}
+
+	switch req.SrcStorage {
+	case "local":
+		c, err := s.store.GetClip(req.SrcKey)
+		if err != nil || c.Kind == "text" {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "源私密文件不存在"})
+			return
+		}
+		p, fn, mErr := s.materializeClipLocalPath(ctx, c)
+		if mErr != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "读取源文件失败"})
+			return
+		}
+		srcLocalPath = p
+		cleanup = fn
+		srcFileName = c.FileName
+		srcMime = c.MimeType
+
+	case "silo":
+		if s.cfg.S3 == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Silo 未连接"})
+			return
+		}
+		srcClean := strings.TrimLeft(req.SrcKey, "/")
+		resp, err := s.cfg.S3.GetObject(ctx, srcClean, "", "")
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "读取 Silo 源文件失败"})
+			return
+		}
+		tmpPath := filepath.Join(s.cfg.DataDir, "staging", fmt.Sprintf("vcopy_%d", time.Now().UTC().UnixNano()))
+		f, fErr := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if fErr != nil {
+			resp.Body.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "创建中转文件失败"})
+			return
+		}
+		_, cpErr := io.Copy(f, resp.Body)
+		resp.Body.Close()
+		_ = f.Close()
+		if cpErr != nil {
+			_ = os.Remove(tmpPath)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "拉取 Silo 源文件失败"})
+			return
+		}
+		srcLocalPath = tmpPath
+		cleanup = func() { _ = os.Remove(tmpPath) }
+		srcFileName = path.Base(srcClean)
+		srcMime = resp.Header.Get("Content-Type")
+
+	case "gdrive":
+		if s.cfg.GDriveRemoteDir == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Google Drive 未启用"})
+			return
+		}
+		rel, ok := cleanRelDrivePath(req.SrcKey)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的 Drive 源路径"})
+			return
+		}
+		tmpPath := filepath.Join(s.cfg.DataDir, "staging", fmt.Sprintf("vcopy_%d", time.Now().UTC().UnixNano()))
+		remoteSrc := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + rel
+		cmd := exec.CommandContext(ctx, s.cfg.RcloneBin, s.rcloneArgs("copyto", remoteSrc, tmpPath)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			_ = os.Remove(tmpPath)
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "拉取 Drive 源文件失败: " + strings.TrimSpace(string(out))})
+			return
+		}
+		srcLocalPath = tmpPath
+		cleanup = func() { _ = os.Remove(tmpPath) }
+		srcFileName = path.Base(rel)
+
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不支持的源存储类型"})
+		return
+	}
+	defer cleanup()
+
+	safeName := store.SanitizeFileName(srcFileName)
+	if srcMime == "" || srcMime == "application/octet-stream" {
+		if g := mime.TypeByExtension(strings.ToLower(filepath.Ext(safeName))); g != "" {
+			srcMime = g
+		} else {
+			srcMime = "application/octet-stream"
+		}
+	}
+
+	// Write into destination pool + folder
+	switch req.DstStorage {
+	case "silo":
+		if s.cfg.S3 == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Silo 未连接"})
+			return
+		}
+		prefix := "images/"
+		if cleanDst, ok := cleanSiloSubfolder(req.DstFolder); ok {
+			prefix = cleanDst + "/"
+		}
+		f, err := os.Open(srcLocalPath)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "打开源文件失败"})
+			return
+		}
+		defer f.Close()
+		st, stErr := f.Stat()
+		if stErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取文件大小失败"})
+			return
+		}
+		dstKey := s.resolveCleanSiloKey(ctx, prefix, safeName)
+		if err := s.cfg.S3.PutObject(ctx, dstKey, f, st.Size(), srcMime, "public, max-age=2592000, immutable"); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "写入 Silo 失败: " + err.Error()})
+			return
+		}
+		pubURL := s.cfg.S3.PublicObjectURL(dstKey)
+		if req.Move {
+			s.cleanupMovedSource(ctx, req.SrcStorage, req.SrcKey, "silo", dstKey, pubURL)
+		} else if req.SrcStorage == "local" {
+			if updated, uErr := s.store.AttachSiloToClip(req.SrcKey, dstKey, pubURL); uErr == nil {
+				s.broadcast("clip.updated", updated)
+			}
+		}
+		s.invalidateMediaCache()
+		s.broadcast("media.refresh", map[string]string{"key": dstKey})
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"ok":         true,
+			"dstStorage": "silo",
+			"dstKey":     dstKey,
+			"fileName":   path.Base(dstKey),
+			"publicUrl":  pubURL,
+		})
+
+	case "gdrive":
+		if s.cfg.GDriveRemoteDir == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Google Drive 未启用"})
+			return
+		}
+		var dirRel string
+		rawFolder := strings.TrimSpace(req.DstFolder)
+		if rawFolder != "" && rawFolder != "/" && rawFolder != "." {
+			sub, ok := cleanDriveSubfolder(rawFolder)
+			if !ok {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的 Google Drive 目标文件夹"})
+				return
+			}
+			dirRel = sub
+		}
+		relKey := s.resolveCleanDriveRelKey(ctx, dirRel, safeName)
+		dest := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + relKey
+		cmd := exec.CommandContext(ctx, s.cfg.RcloneBin, s.rcloneArgs("copyto", srcLocalPath, dest)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "写入 Google Drive 失败: " + strings.TrimSpace(string(out))})
+			return
+		}
+		if req.Move {
+			s.cleanupMovedSource(ctx, req.SrcStorage, req.SrcKey, "gdrive", relKey, "")
+		} else if req.SrcStorage == "local" {
+			if updated, uErr := s.store.AttachGDriveToClip(req.SrcKey, relKey); uErr == nil {
+				s.broadcast("clip.updated", updated)
+			}
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"ok":         true,
+			"dstStorage": "gdrive",
+			"dstKey":     relKey,
+			"fileName":   path.Base(relKey),
+		})
+
+	case "local":
+		inF, err := os.Open(srcLocalPath)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "打开源文件失败"})
+			return
+		}
+		defer inF.Close()
+		id := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+		rel := filepath.Join("clips", id+"_"+safeName)
+		dstPath := filepath.Join(s.cfg.DataDir, rel)
+		outF, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "写入本地文件失败"})
+			return
+		}
+		hasher := sha256.New()
+		written, cpErr := io.Copy(io.MultiWriter(outF, hasher), inF)
+		_ = outF.Close()
+		if cpErr != nil {
+			_ = os.Remove(dstPath)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "复制文件流失败"})
+			return
+		}
+		kind := "file"
+		if strings.HasPrefix(srcMime, "image/") {
+			kind = "image"
+		}
+		shaHex := hex.EncodeToString(hasher.Sum(nil))
+		clipItem, err := s.store.AddFileClip("", kind, safeName, srcMime, written, shaHex[:16], rel, "")
+		if err != nil {
+			_ = os.Remove(dstPath)
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		s.broadcast("clip.created", clipItem)
+		if req.Move {
+			s.cleanupMovedSource(ctx, req.SrcStorage, req.SrcKey, "local", clipItem.ID, "")
+		}
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"ok":         true,
+			"dstStorage": "local",
+			"dstKey":     clipItem.ID,
+			"fileName":   clipItem.FileName,
+			"clip":       clipItem,
+		})
+
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "不支持的目标存储类型"})
+	}
+}
+
+func (s *Server) cleanupMovedSource(ctx context.Context, srcStorage, srcKey, dstStorage, dstKey, pubURL string) {
+	switch srcStorage {
+	case "local":
+		if dstStorage != "local" {
+			// Remember old local file path before SyncVaultMove clears LocalRel
+			var oldLocalRel string
+			if c, err := s.store.GetClip(srcKey); err == nil {
+				oldLocalRel = c.LocalRel
+			}
+			upClips, upShares := s.store.SyncVaultMove("local", srcKey, dstStorage, dstKey, pubURL)
+			for _, c := range upClips {
+				s.broadcast("clip.updated", c)
+			}
+			for _, sh := range upShares {
+				s.broadcast("share.updated", sh)
+			}
+			if oldLocalRel != "" {
+				_ = os.Remove(filepath.Join(s.cfg.DataDir, oldLocalRel))
+			}
+		}
+	case "silo":
+		clean := strings.TrimLeft(srcKey, "/")
+		if s.cfg.S3 != nil {
+			_ = s.cfg.S3.DeleteObject(ctx, clean)
+		}
+		s.evictTrackCache(clean)
+		s.invalidateMediaCache()
+		if dstStorage != "local" {
+			upClips, upShares := s.store.SyncVaultMove("silo", clean, dstStorage, dstKey, pubURL)
+			for _, c := range upClips {
+				s.broadcast("clip.updated", c)
+			}
+			for _, sh := range upShares {
+				s.broadcast("share.updated", sh)
+			}
+		} else {
+			upClips, delClips, _ := s.store.SyncSiloDelete(clean)
+			for _, c := range upClips {
+				s.broadcast("clip.updated", c)
+			}
+			for _, id := range delClips {
+				s.broadcast("clip.deleted", map[string]string{"id": id})
+			}
+		}
+		s.broadcast("media.refresh", map[string]string{"movedFrom": clean})
+	case "gdrive":
+		if rel, ok := cleanRelDrivePath(srcKey); ok && s.cfg.GDriveRemoteDir != "" {
+			remoteSrc := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + rel
+			cmd := exec.CommandContext(ctx, s.cfg.RcloneBin, s.rcloneArgs("deletefile", remoteSrc)...)
+			_ = cmd.Run()
+			if dstStorage != "local" {
+				upClips, upShares := s.store.SyncVaultMove("gdrive", rel, dstStorage, dstKey, pubURL)
+				for _, c := range upClips {
+					s.broadcast("clip.updated", c)
+				}
+				for _, sh := range upShares {
+					s.broadcast("share.updated", sh)
+				}
+			} else {
+				upClips, delClips, _ := s.store.SyncGDriveDelete(rel)
+				for _, c := range upClips {
+					s.broadcast("clip.updated", c)
+				}
+				for _, id := range delClips {
+					s.broadcast("clip.deleted", map[string]string{"id": id})
+				}
+			}
+		}
+	}
 }

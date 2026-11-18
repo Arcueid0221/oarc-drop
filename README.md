@@ -17,7 +17,9 @@
    - **零浏览器原生弹窗**：全站删除、清扫与作废外链均采用原地弹性变形确认胶囊（Morph Confirm + 异步旋转动圈）。
 2. **文件柜（Vault）**：
    - **三存储池全局统一显示样式**：右上角选定「缩略图画廊 / 信息列表」后，在 **Silo 对象存储 · Google Drive · 私密互传** 三个存储池保持一致的显示样式，切换存储池绝不跳变视图；手机端自适应双层防挤压卡片与双列缩略图网格。
-   - **两级中文目录用途导航**：Silo 按「全部 · 图床相关（图片 / 视频 / 快传归档）· 博客相关（文章配图 / 相册 / 说说 / 站点配置 / 头像 / 3D 看板娘，默认带防误删保护锁）· 音乐相关（音源 / 歌单封面 / 单曲封面 / 歌词）」分级展开并标注目录用途；Google Drive 支持子目录筛选与流式预览；音频文件支持一键送入唱机。
+   - **两级中文目录用途导航与文件夹增删**：Silo 按「全部 · 图床相关 · 博客相关（默认加锁防误删）· 音乐相关 · 其他目录」分级展开并标注目录用途；支持在 Silo（`.keep` 零字节占位）与 Google Drive 隔离目录内直接 **新建自定义子文件夹** 与 **安全删除文件夹**（非空目录自动提示文件数与体积确认，博客/音乐生产目录禁止误删）。
+   - **跨容器任意具体目录复制/移动 & 多选批量操作**：支持单文件或开启 **「多选」** 批量勾选后，在 `Silo ↔ Google Drive ↔ 私密互传` 任意容器的具体文件夹（或当场新建子目录）之间服务端流式 **复制或移动**（同桶零拷贝 `CopyObject`、移动后自动更新已绑定短链不死链），以及一键 **批量删除**。
+   - **iOS 桌面图标、灵动岛与主屏全屏（PWA Standalone）适配**：纯 Go 零外部资源合成 `180×180` / `512×512` 器材风桌面图标（经 `/assets/*` 免登录直出，iOS 添加到主屏幕不白屏），四向 `env(safe-area-inset-*)` 适配灵动岛与底部横条。
 3. **音乐厅（Music）**：
    - **上半部恒高一体式唱机台 + 下半部曲库独立滚动**：黑胶唱盘、带微刻度尺的果冻进度条（拖动跟手预览、松手精准跳转）、主控键与 **内嵌居中滚动 `.lrc` 歌词窗** 融于同一面板；有词与纯音乐切换带弹簧回弹过渡，联动博客公开歌单保序连播与锁屏 MediaSession 控制。
 4. **外链管理与公开取件单（Shares & `/s/{code}`）**：
@@ -31,13 +33,13 @@
 |---|---|---|
 | [`cmd/oarc-drop/main.go`](cmd/oarc-drop/main.go) | 生产服务端入口 | 环境变量装配、优雅停机、10 分钟周期后台清扫协程 |
 | [`cmd/demo/main.go`](cmd/demo/main.go) | 免配置本地演示入口 | 内置内存态 Mock Silo S3 + 示例 ID3v2 音频与 `.lrc` 词谱 |
-| [`internal/server/`](internal/server) | HTTP / SSE 路由与文件柜编排 | Go 1.22+ 标准路由、CF Access 鉴权、`20 MiB` 分片引擎、`rclone` 隔离调用、Range 反代 |
-| [`internal/store/store.go`](internal/store/store.go) | 并发状态与短链存储 | `sync.RWMutex` + `tmp/fsync/rename` 原子持久化、`subtle.ConstantTimeCompare` 密码核验、跨栏防死链同步 |
+| [`internal/server/`](internal/server) | HTTP / SSE 路由、跨池流转与桌面图标合成 | Go 1.22+ 标准路由、CF Access 鉴权、`20 MiB` 分片引擎、三存储池流式复制/移动、纯 Go 合成 `180/512px` PNG 图标 |
+| [`internal/store/store.go`](internal/store/store.go) | 并发状态与短链存储 | `sync.RWMutex` + `tmp/fsync/rename` 原子持久化、`subtle.ConstantTimeCompare` 密码核验、跨池移动/删除防死链同步 |
 | [`internal/s3client/s3.go`](internal/s3client/s3.go) | 纯标准库 S3 客户端 | 零 SDK 手写 AWS SigV4 签名、`ListObjectsV2`、S3 Multipart 流式分片直传、`CopyObject` |
 | [`internal/mediameta/meta.go`](internal/mediameta/meta.go) | 流式音频头解析器 | 仅拉取前 `512 KiB` 解析 `ID3v2.3/v2.4` 与 `FLAC StreamInfo/Vorbis/Picture` 内嵌封面 |
 | [`internal/qrcode/qr.go`](internal/qrcode/qr.go) | 零依赖二维码引擎 | 纯 Go 实现 `GF(256)` Reed-Solomon 纠错编码与 8 掩模评分，直出矢量 SVG |
-| [`web/src/composables/useDropStore.ts`](web/src/composables/useDropStore.ts) | 前端全局响应式总线 | `EventSource` SSE 实时同步、锁屏唤醒补拉、`XHR` 粘贴进度队列、Canvas 封面取色与 PNG 剪贴板写入 |
-| [`web/src/components/`](web/src/components) | 四栏视图与精工交互组件 | `HubView` · `VaultView` · `MusicView` · `AudioEngine` · `DriveFolderSelect` · `MorphDeleteBtn` · `QrDialog` · `PublicSharePortal` |
+| [`web/src/composables/useDropStore.ts`](web/src/composables/useDropStore.ts) | 前端全局响应式总线 | `EventSource` SSE 实时同步、文件夹增删与跨池流转 API、`XHR` 粘贴进度队列、Canvas 封面取色与 PNG 剪贴板写入 |
+| [`web/src/components/`](web/src/components) | 四栏视图与精工交互组件 | `HubView` · `VaultView` · `VaultCopyModal` · `MusicView` · `AudioEngine` · `DriveFolderSelect` · `MorphDeleteBtn` · `QrDialog` · `PublicSharePortal` |
 | [`deploy/docker-compose.yml`](deploy/docker-compose.yml) | 容器化编排 | 多阶段构建（Node 22 + Go 1.24 → Debian Slim + `rclone`），非 root 运行，`128 MiB` 内存硬上限 |
 
 ---
@@ -65,6 +67,11 @@ go run ./cmd/demo
 
 ## 发布记录
 
+- **2026-11-19 v1.4.0（iOS 桌面图标与灵动岛全屏适配 · 文件夹增删 · 跨容器复制/移动与多选批量管理）**：
+  - **手机桌面图标、灵动岛与主屏全屏适配**：纯 Go 实时合成 `180×180`（iPhone `@3x` 主屏幕圆角安全区全出血）与 `512×512` 器材风应用图标及 `manifest.webmanifest`，挂载于 `/assets/*` 免登录直出以兼容 Cloudflare Access 下的 iOS「添加到主屏幕」抓取；补齐 `apple-mobile-web-app-capable`、随深浅主题切换的状态栏底色与四向 `env(safe-area-inset-*)` 灵动岛避让。
+  - **修复手机端无法新建 Google Drive 子目录**：定位并修复 iOS Safari 软键盘弹出触发全局 `resize` / `scroll` 导致下拉框闪退关闭的问题，移动端改为上半屏安全定位与 `16px` 防自动缩放输入框。
+  - **Silo 与 Google Drive 文件夹增删**：支持在文件柜内直接新建 Silo 目录（写入 `.keep` 标记持久化空文件夹）与 Drive 子目录，并支持安全删除自定义目录（非空目录返回 `409` 提示文件数量与体积二次确认，博客与音乐生产目录返回 `403` 防误删）。
+  - **跨容器具体文件夹复制/移动与多选批量操作**：新增 `POST /api/vault/copy` 与 `VaultCopyModal`，支持将单文件或多选批量文件在 `Silo ↔ Google Drive ↔ 私密互传` 任意具体子目录间服务端直转（Silo 同桶走 `CopyObject` 零拷贝、Drive 同盘走 `rclone copyto/moveto`、移动后自动同步短链引用）；文件柜新增「多选」模式与底部悬浮批量操作坞（支持全选、批量复制、批量移动与批量删除进度展示）。
 - **2026-11-19 v1.3.0（文件柜两级中文导航与统一视图 · 粘贴实时进度与动圈 · 手机端与跨页死链全量修复）**：
   - **文件柜体验重做**：三个存储池（Silo / Google Drive / 私密互传）全局统一「缩略图网格 / 列表」显示样式，切换存储池不再跳变视图，顶部筛选与说明栏随存储池平滑联动；Silo 新增「图床相关 / 博客相关 / 音乐相关」两级中文目录说明导航与卡片用途标注，Google Drive 补齐子目录筛选与灯箱预览，音频支持一键送入唱机。
   - **全链路进度与旋转动圈**：`20 MiB` 以内快速粘贴改走 `XMLHttpRequest` 实时进度队列；所有删除、作废外链、转存图床、转存/新建 Google Drive 目录均补齐防连点旋转动圈。

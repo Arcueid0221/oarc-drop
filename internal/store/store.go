@@ -804,6 +804,94 @@ func (s *Store) SyncGDriveDelete(deletedRelPath string) ([]*ClipItem, []string, 
 	return updatedClips, deletedClipIDs, deletedShareCodes
 }
 
+// SyncVaultMove updates any existing ShareItem / ClipItem references when a file is moved
+// to a new storage pool or folder so public /s/* links and Hub cards never break!
+func (s *Store) SyncVaultMove(srcStorage, srcKey, dstStorage, dstKey, newPublicURL string) ([]*ClipItem, []*ShareItem) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	newBase := filepath.Base(strings.ReplaceAll(dstKey, "\\", "/"))
+	var updatedClips []*ClipItem
+	var updatedShares []*ShareItem
+	dirty := false
+
+	for _, sh := range s.shares {
+		if sh.Storage == srcStorage && sh.StorageKey == srcKey && dstStorage != "local" {
+			sh.Storage = dstStorage
+			sh.StorageKey = dstKey
+			sh.FileName = newBase
+			dirty = true
+			updatedShares = append(updatedShares, sanitizeShare(sh))
+		}
+	}
+
+	for _, c := range s.clips {
+		changed := false
+		if srcStorage == "local" && c.ID == srcKey && dstStorage != "local" {
+			oldRel := c.LocalRel
+			c.Storage = dstStorage
+			c.StorageKey = dstKey
+			c.LocalRel = ""
+			c.FileName = newBase
+			if dstStorage == "silo" {
+				c.SiloKey = dstKey
+				c.PublicURL = newPublicURL
+			} else if dstStorage == "gdrive" {
+				c.GDrivePath = dstKey
+			}
+			if c.ShareCode != "" {
+				if sh, ok := s.shares[c.ShareCode]; ok && sh.Storage == "local" && sh.StorageKey == oldRel {
+					sh.Storage = dstStorage
+					sh.StorageKey = dstKey
+					sh.FileName = newBase
+					updatedShares = append(updatedShares, sanitizeShare(sh))
+				}
+			}
+			changed = true
+		} else if c.Storage == srcStorage && c.StorageKey == srcKey && dstStorage != "local" {
+			c.Storage = dstStorage
+			c.StorageKey = dstKey
+			c.FileName = newBase
+			if dstStorage == "silo" {
+				c.SiloKey = dstKey
+				c.PublicURL = newPublicURL
+			} else if dstStorage == "gdrive" {
+				c.GDrivePath = dstKey
+				if srcStorage == "silo" && c.SiloKey == srcKey {
+					c.SiloKey = ""
+					c.PublicURL = ""
+				}
+			}
+			changed = true
+		} else if srcStorage == "silo" && c.SiloKey == srcKey {
+			if dstStorage == "silo" {
+				c.SiloKey = dstKey
+				c.PublicURL = newPublicURL
+			} else {
+				c.SiloKey = ""
+				c.PublicURL = ""
+			}
+			changed = true
+		} else if srcStorage == "gdrive" && c.GDrivePath == srcKey {
+			if dstStorage == "gdrive" {
+				c.GDrivePath = dstKey
+			} else {
+				c.GDrivePath = ""
+			}
+			changed = true
+		}
+		if changed {
+			dirty = true
+			cc := *c
+			updatedClips = append(updatedClips, &cc)
+		}
+	}
+
+	if dirty {
+		_ = s.saveLocked()
+	}
+	return updatedClips, updatedShares
+}
+
 // Upload sessions (in-memory + staging files on disk)
 
 func (s *Store) CreateUploadSession(u *UploadSession) {

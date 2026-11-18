@@ -71,7 +71,11 @@ func newFakeSiloTransport(t *testing.T, bucket string, initial map[string]memObj
 				IsTruncated bool     `xml:"IsTruncated"`
 				Contents    []item   `xml:"Contents"`
 			}
+			prefix := r.URL.Query().Get("prefix")
 			for k, o := range objs {
+				if prefix != "" && !strings.HasPrefix(k, prefix) {
+					continue
+				}
 				resp.Contents = append(resp.Contents, item{
 					Key:          k,
 					LastModified: "2026-11-18T06:00:00Z",
@@ -275,35 +279,64 @@ func TestEndToEndFlow(t *testing.T) {
 	fakeGDriveRoot := filepath.Join(tmpDir, "fake-gdrive")
 	_ = os.MkdirAll(fakeGDriveRoot, 0o755)
 	fakeRclone := filepath.Join(tmpDir, "fake-rclone.sh")
-	rcloneScript := fmt.Sprintf(`#!/bin/sh
+	rcloneScript := strings.ReplaceAll(`#!/bin/sh
 set -e
 cmd="$1"
 if [ "$cmd" = "copyto" ]; then
-  src="$2"
-  dst=$(echo "$3" | sed 's|^gdrive:OArc-Drop/|%s/|')
+  src=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|__GDRIVE_ROOT__/|')
+  dst=$(echo "$3" | sed 's|^gdrive:OArc-Drop/|__GDRIVE_ROOT__/|')
   mkdir -p "$(dirname "$dst")"
   cp "$src" "$dst"
+elif [ "$cmd" = "moveto" ]; then
+  src=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|__GDRIVE_ROOT__/|')
+  dst=$(echo "$3" | sed 's|^gdrive:OArc-Drop/|__GDRIVE_ROOT__/|')
+  mkdir -p "$(dirname "$dst")"
+  mv "$src" "$dst"
 elif [ "$cmd" = "cat" ]; then
-  src=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|%s/|')
+  src=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|__GDRIVE_ROOT__/|')
   cat "$src"
 elif [ "$cmd" = "mkdir" ]; then
-  dst=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|%s/|')
+  dst=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|__GDRIVE_ROOT__/|')
   mkdir -p "$dst"
 elif [ "$cmd" = "deletefile" ]; then
-  dst=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|%s/|')
+  dst=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|__GDRIVE_ROOT__/|')
   rm -f "$dst"
 elif [ "$cmd" = "lsf" ]; then
-  # rclone lsf --files-only <remoteDir>
-  dir=$(echo "$3" | sed 's|^gdrive:OArc-Drop$|%s|; s|^gdrive:OArc-Drop/|%s/|')
+  dir=$(echo "$3" | sed 's|^gdrive:OArc-Drop$|__GDRIVE_ROOT__|; s|^gdrive:OArc-Drop/|__GDRIVE_ROOT__/|')
   if [ -d "$dir" ]; then
     for f in "$dir"/*; do
       [ -f "$f" ] && basename "$f"
     done
   fi
+elif [ "$cmd" = "purge" ]; then
+  dst=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|__GDRIVE_ROOT__/|')
+  rm -rf "$dst"
 elif [ "$cmd" = "lsjson" ]; then
-  printf '[{"Path":"2026-11"},{"Path":"归档"}]'
+  dir=$(echo "$2" | sed 's|^gdrive:OArc-Drop$|__GDRIVE_ROOT__|; s|^gdrive:OArc-Drop/|__GDRIVE_ROOT__/|')
+  if [ "$4" = "--dirs-only" ]; then
+    printf '[{"Path":"2026-11"},{"Path":"归档"}]'
+  elif [ "$4" = "--files-only" ]; then
+    if [ -d "$dir" ]; then
+      first=1
+      printf '['
+      for f in "$dir"/*; do
+        if [ -f "$f" ]; then
+          [ "$first" = "0" ] && printf ','
+          first=0
+          bn=$(basename "$f")
+          sz=$(wc -c < "$f" | tr -d ' ')
+          printf '{"Path":"%s","Name":"%s","Size":%s,"MimeType":"application/octet-stream","ModTime":"2026-11-19T00:00:00Z"}' "$bn" "$bn" "$sz"
+        fi
+      done
+      printf ']'
+    else
+      printf '[]'
+    fi
+  else
+    printf '[{"Path":"2026-11"},{"Path":"归档"}]'
+  fi
 fi
-`, fakeGDriveRoot, fakeGDriveRoot, fakeGDriveRoot, fakeGDriveRoot, fakeGDriveRoot, fakeGDriveRoot)
+`, "__GDRIVE_ROOT__", fakeGDriveRoot)
 	if err := os.WriteFile(fakeRclone, []byte(rcloneScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -586,5 +619,103 @@ fi
 	remaining := st.ListClips()
 	if len(remaining) != 1 || remaining[0].ID != p1.ID {
 		t.Fatalf("expected only 1 pinned clip remaining, got %d", len(remaining))
+	}
+
+	// 15. Unauthenticated PWA full-screen manifest & 512px PNG touch icon under /assets/*
+	mfResp := doReq(http.MethodGet, "/assets/manifest.webmanifest", nil, "", false, nil)
+	if mfResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 for manifest without auth, got %d", mfResp.StatusCode)
+	}
+	icResp := doReq(http.MethodGet, "/assets/apple-touch-icon.png", nil, "", false, nil)
+	icBytes, _ := io.ReadAll(icResp.Body)
+	if icResp.StatusCode != http.StatusOK || len(icBytes) < 1024 || !bytes.HasPrefix(icBytes, []byte{0x89, 'P', 'N', 'G'}) {
+		t.Fatalf("expected valid PNG touch icon without auth, status=%d len=%d", icResp.StatusCode, len(icBytes))
+	}
+
+	// 16. Silo & Drive folder creation + cross-pool specific folder copy + protected/non-empty folder deletion guards
+	mkSiloDir := doReq(http.MethodPost, "/api/silo/folders", strings.NewReader(`{"folder":"images/memes"}`), "application/json", true, nil)
+	if mkSiloDir.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating Silo folder images/memes, got %d", mkSiloDir.StatusCode)
+	}
+	vObjsResp := doReq(http.MethodGet, "/api/silo/objects", nil, "", true, nil)
+	var vObjs struct {
+		Items   []server.VaultObject `json:"items"`
+		Folders []string             `json:"folders"`
+	}
+	_ = json.NewDecoder(vObjsResp.Body).Decode(&vObjs)
+	hasMemesFolder := false
+	for _, f := range vObjs.Folders {
+		if f == "images/memes" {
+			hasMemesFolder = true
+		}
+	}
+	for _, it := range vObjs.Items {
+		if it.Name == ".keep" {
+			t.Fatalf(".keep marker must not leak into Vault file items")
+		}
+	}
+	if !hasMemesFolder {
+		t.Fatalf("expected empty Silo folder images/memes persisted in folders list: %+v", vObjs.Folders)
+	}
+
+	// Copy Silo photos/pic1.jpg -> Silo images/memes/ & Google Drive 归档/
+	cpSiloToSilo := doReq(http.MethodPost, "/api/vault/copy", strings.NewReader(`{"srcStorage":"silo","srcKey":"photos/pic1.jpg","dstStorage":"silo","dstFolder":"images/memes"}`), "application/json", true, nil)
+	if cpSiloToSilo.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 copying Silo -> Silo folder, got %d", cpSiloToSilo.StatusCode)
+	}
+	cpSiloToDrive := doReq(http.MethodPost, "/api/vault/copy", strings.NewReader(`{"srcStorage":"silo","srcKey":"photos/pic1.jpg","dstStorage":"gdrive","dstFolder":"归档"}`), "application/json", true, nil)
+	if cpSiloToDrive.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 copying Silo -> Drive folder, got %d", cpSiloToDrive.StatusCode)
+	}
+	cpDriveToLocal := doReq(http.MethodPost, "/api/vault/copy", strings.NewReader(`{"srcStorage":"gdrive","srcKey":"归档/pic1.jpg","dstStorage":"local"}`), "application/json", true, nil)
+	if cpDriveToLocal.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 copying Drive -> Local pool, got %d", cpDriveToLocal.StatusCode)
+	}
+
+	// Moving protected blog photo without force=true must return 403
+	mvProtected := doReq(http.MethodPost, "/api/vault/copy", strings.NewReader(`{"srcStorage":"silo","srcKey":"photos/pic1.jpg","dstStorage":"silo","dstFolder":"images/memes","move":true}`), "application/json", true, nil)
+	if mvProtected.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 moving protected blog asset without force, got %d", mvProtected.StatusCode)
+	}
+	// Moving into the exact same folder is a safe 200 no-op
+	mvNoop := doReq(http.MethodPost, "/api/vault/copy", strings.NewReader(`{"srcStorage":"silo","srcKey":"images/memes/pic1.jpg","dstStorage":"silo","dstFolder":"images/memes","move":true}`), "application/json", true, nil)
+	if mvNoop.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 no-op moving file into same folder, got %d", mvNoop.StatusCode)
+	}
+	// Copy another file into images/memes, then move it to Drive 2026-11 and verify source was removed
+	_ = doReq(http.MethodPost, "/api/vault/copy", strings.NewReader(`{"srcStorage":"silo","srcKey":"photos/pic1.jpg","dstStorage":"silo","dstFolder":"images/memes"}`), "application/json", true, nil)
+	mvSiloToDrive := doReq(http.MethodPost, "/api/vault/copy", strings.NewReader(`{"srcStorage":"silo","srcKey":"images/memes/pic1-2.jpg","dstStorage":"gdrive","dstFolder":"2026-11","move":true}`), "application/json", true, nil)
+	if mvSiloToDrive.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 moving Silo -> Drive folder, got %d", mvSiloToDrive.StatusCode)
+	}
+	checkGone := doReq(http.MethodGet, "/api/silo/object?key=images/memes/pic1-2.jpg", nil, "", true, nil)
+	if checkGone.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected moved Silo source images/memes/pic1-2.jpg to be deleted, got %d", checkGone.StatusCode)
+	}
+
+	// Deleting protected blog folder `photos` must return 403
+	delProtDir := doReq(http.MethodDelete, "/api/silo/folders?folder=photos&force=1", nil, "", true, nil)
+	if delProtDir.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 deleting protected blog folder photos, got %d", delProtDir.StatusCode)
+	}
+	// Deleting non-empty `images/memes` without force=1 must return 409 Conflict
+	delMemesNoForce := doReq(http.MethodDelete, "/api/silo/folders?folder=images/memes", nil, "", true, nil)
+	if delMemesNoForce.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 deleting non-empty Silo folder without force, got %d", delMemesNoForce.StatusCode)
+	}
+	// With force=1 it deletes cleanly
+	delMemesForce := doReq(http.MethodDelete, "/api/silo/folders?folder=images/memes&force=1", nil, "", true, nil)
+	if delMemesForce.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 deleting Silo folder with force=1, got %d", delMemesForce.StatusCode)
+	}
+
+	// Deleting non-empty Drive folder `归档` without force=1 returns 409; with force=1 returns 200
+	delDriveNoForce := doReq(http.MethodDelete, "/api/gdrive/folders?folder="+url.QueryEscape("归档"), nil, "", true, nil)
+	if delDriveNoForce.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 deleting non-empty Drive folder without force, got %d", delDriveNoForce.StatusCode)
+	}
+	delDriveForce := doReq(http.MethodDelete, "/api/gdrive/folders?folder="+url.QueryEscape("归档")+"&force=1", nil, "", true, nil)
+	if delDriveForce.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 deleting Drive folder with force=1, got %d", delDriveForce.StatusCode)
 	}
 }

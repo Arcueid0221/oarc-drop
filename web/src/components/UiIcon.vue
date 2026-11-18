@@ -45,6 +45,9 @@ withDefaults(
       | 'spinner'
       | 'video'
       | 'broom'
+      | 'folder-plus'
+      | 'move'
+      | 'check-square'
     size?: number
   }>(),
   { size: 16 },
@@ -254,6 +257,18 @@ withDefaults(
       <path d="m13 11 9-9" />
       <path d="M14.6 12.6c.8.8.9 2.1.2 3L10 22l-8-8 6.4-4.8c.9-.7 2.2-.6 3 .2Z" />
       <path d="m6.8 10.5 6.7 6.7" />
+    </template>
+    <template v-else-if="name === 'folder-plus'">
+      <path d="M12 10v6M9 13h6" />
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+    </template>
+    <template v-else-if="name === 'move'">
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+      <path d="M9 13h6m0 0-2.5-2.5M15 13l-2.5 2.5" />
+    </template>
+    <template v-else-if="name === 'check-square'">
+      <rect width="18" height="18" x="3" y="3" rx="3.5" />
+      <path d="m8.5 12.3 2.3 2.3 4.8-4.8" />
     </template>
   </svg>
 </template>

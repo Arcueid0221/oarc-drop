@@ -57,8 +57,17 @@ const isHighlighted = computed(() =>
 function updatePosition() {
   const btn = triggerEl.value
   if (!btn) return
+  if (window.innerWidth <= 680) {
+    menuStyle.value = {
+      position: 'fixed',
+      left: 'max(14px, calc(env(safe-area-inset-left, 0px) + 14px))',
+      right: 'max(14px, calc(env(safe-area-inset-right, 0px) + 14px))',
+      top: 'max(74px, calc(env(safe-area-inset-top, 0px) + 22px))',
+    }
+    return
+  }
   const r = btn.getBoundingClientRect()
-  const menuW = 224
+  const menuW = 228
   let left = r.right - menuW
   if (left < 10) left = 10
   if (left + menuW > window.innerWidth - 10) {
@@ -82,6 +91,13 @@ function updatePosition() {
   }
 }
 
+function onWindowScroll(e: Event) {
+  const t = e.target as Node | null
+  if (t && menuEl.value?.contains(t)) return
+  if (document.activeElement && menuEl.value?.contains(document.activeElement)) return
+  closeMenu()
+}
+
 async function toggleOpen() {
   if (props.busy) return
   if (isOpen.value) {
@@ -95,16 +111,16 @@ async function toggleOpen() {
   await nextTick()
   updatePosition()
   window.addEventListener('pointerdown', onOutsidePointer, true)
-  window.addEventListener('scroll', closeMenu, true)
-  window.addEventListener('resize', closeMenu)
+  window.addEventListener('scroll', onWindowScroll, true)
+  window.addEventListener('resize', updatePosition)
 }
 
 function closeMenu() {
   isOpen.value = false
   newFolderDraft.value = ''
   window.removeEventListener('pointerdown', onOutsidePointer, true)
-  window.removeEventListener('scroll', closeMenu, true)
-  window.removeEventListener('resize', closeMenu)
+  window.removeEventListener('scroll', onWindowScroll, true)
+  window.removeEventListener('resize', updatePosition)
 }
 
 function onOutsidePointer(e: PointerEvent) {
@@ -339,6 +355,18 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+}
+
+@media (max-width: 680px) {
+  .dp-input {
+    height: 35px;
+    font-size: 16px;
+  }
+  .dp-add-btn {
+    height: 35px;
+    padding: 0 12px;
+    font-size: 0.8rem;
+  }
 }
 
 .pop-drop-enter-active,

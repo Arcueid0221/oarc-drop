@@ -219,10 +219,14 @@ onMounted(() => {
 
 <style scoped>
 .ticket-stage {
-  min-height: 100vh;
+  min-height: 100dvh;
   display: grid;
   place-items: center;
-  padding: 28px 16px;
+  padding:
+    calc(28px + env(safe-area-inset-top, 0px))
+    calc(16px + env(safe-area-inset-right, 0px))
+    calc(28px + env(safe-area-inset-bottom, 0px))
+    calc(16px + env(safe-area-inset-left, 0px));
   perspective: 1100px;
   position: relative;
   z-index: 2;

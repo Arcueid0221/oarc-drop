@@ -418,6 +418,153 @@ export function useDropStore() {
     return d.folder
   }
 
+  async function createSiloFolder(folderName: string): Promise<string | null> {
+    const clean = folderName.trim().replace(/^\/+|\/+$/g, '')
+    if (!clean) return null
+    const res = await fetch('/api/silo/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder: clean }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: '创建 Silo 文件夹失败' }))
+      showToast(err.error || '创建 Silo 文件夹失败')
+      return null
+    }
+    const d: { folder: string } = await res.json()
+    if (!siloFolders.value.includes(d.folder)) {
+      siloFolders.value = [...siloFolders.value, d.folder].sort((a, b) => a.localeCompare(b))
+    }
+    showToast(`已创建 Silo 文件夹：${d.folder}`)
+    return d.folder
+  }
+
+  async function deleteSiloFolder(
+    folder: string,
+    force = false,
+  ): Promise<{
+    ok: boolean
+    nonEmpty?: boolean
+    fileCount?: number
+    totalBytes?: number
+    deletedFiles?: number
+    error?: string
+  }> {
+    const res = await fetch(
+      `/api/silo/folders?folder=${encodeURIComponent(folder)}&force=${force ? '1' : '0'}`,
+      { method: 'DELETE' },
+    )
+    const d = await res.json().catch(() => ({}))
+    if (res.status === 409 && d.nonEmpty) {
+      return {
+        ok: false,
+        nonEmpty: true,
+        fileCount: d.fileCount || 0,
+        totalBytes: d.totalBytes || 0,
+        error: d.error,
+      }
+    }
+    if (!res.ok) {
+      const msg = d.error || '删除文件夹失败'
+      showToast(msg)
+      return { ok: false, error: msg }
+    }
+    siloFolders.value = siloFolders.value.filter(
+      (f) => f !== folder && !f.startsWith(`${folder}/`),
+    )
+    siloObjects.value = siloObjects.value.filter(
+      (it) => it.folder !== folder && !it.folder.startsWith(`${folder}/`),
+    )
+    showToast(`已删除 Silo 文件夹：${folder}`)
+    void loadMedia(true)
+    return { ok: true, deletedFiles: d.deletedFiles || 0 }
+  }
+
+  async function deleteGDriveFolder(
+    folder: string,
+    force = false,
+  ): Promise<{
+    ok: boolean
+    nonEmpty?: boolean
+    fileCount?: number
+    error?: string
+  }> {
+    const res = await fetch(
+      `/api/gdrive/folders?folder=${encodeURIComponent(folder)}&force=${force ? '1' : '0'}`,
+      { method: 'DELETE' },
+    )
+    const d = await res.json().catch(() => ({}))
+    if (res.status === 409 && d.nonEmpty) {
+      return {
+        ok: false,
+        nonEmpty: true,
+        fileCount: d.fileCount || 0,
+        error: d.error,
+      }
+    }
+    if (!res.ok) {
+      const msg = d.error || '删除 Drive 文件夹失败'
+      showToast(msg)
+      return { ok: false, error: msg }
+    }
+    gdriveFolders.value = gdriveFolders.value.filter(
+      (f) => f !== folder && !f.startsWith(`${folder}/`),
+    )
+    gdriveFiles.value = gdriveFiles.value.filter(
+      (it) => it.folder !== folder && !it.folder.startsWith(`${folder}/`),
+    )
+    showToast(`已删除 Drive 文件夹：${folder}`)
+    return { ok: true }
+  }
+
+  async function transferVaultItem(opts: {
+    srcStorage: 'silo' | 'gdrive' | 'local'
+    srcKey: string
+    dstStorage: 'silo' | 'gdrive' | 'local'
+    dstFolder?: string
+    move?: boolean
+    force?: boolean
+    silent?: boolean
+  }): Promise<{ ok: boolean; dstKey?: string; publicUrl?: string; noop?: boolean; error?: string }> {
+    const res = await fetch('/api/vault/copy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        srcStorage: opts.srcStorage,
+        srcKey: opts.srcKey,
+        dstStorage: opts.dstStorage,
+        dstFolder: opts.dstFolder || '',
+        move: Boolean(opts.move),
+        force: Boolean(opts.force),
+      }),
+    })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      const msg = d.error || (opts.move ? '移动失败' : '复制失败')
+      if (!opts.silent) showToast(msg)
+      return { ok: false, error: msg }
+    }
+    if (!opts.silent) {
+      if (d.noop) {
+        showToast('文件已在目标目录中')
+      } else {
+        const poolName =
+          opts.dstStorage === 'silo'
+            ? 'Silo'
+            : opts.dstStorage === 'gdrive'
+              ? 'Google Drive'
+              : '私密互传'
+        showToast(`${opts.move ? '已移至' : '已复制到'} ${poolName}`)
+      }
+    }
+    return {
+      ok: true,
+      dstKey: d.dstKey,
+      publicUrl: d.publicUrl,
+      noop: Boolean(d.noop),
+    }
+  }
+
   async function promoteClipToSilo(item: ClipItem, autoCopyFmt: 'md' | 'url' = 'md') {
     if (item.publicUrl) {
       const out =
@@ -998,6 +1145,10 @@ export function useDropStore() {
     loadGDriveFiles,
     loadGDriveFolders,
     createGDriveFolder,
+    createSiloFolder,
+    deleteSiloFolder,
+    deleteGDriveFolder,
+    transferVaultItem,
     promoteClipToSilo,
     archiveClipToGDrive,
     toggleClipPin,

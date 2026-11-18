@@ -76,7 +76,7 @@
     <text x="150" y="22.5" text-anchor="middle" class="mono" font-size="11.5" font-weight="700" letter-spacing="0.12em" fill="#ffffff">DROP</text>
 
     <text x="190" y="23.5" class="sans" font-size="15" font-weight="650" fill="#1e293b">项目结构与全栈技术蓝图</text>
-    <text x="368" y="23.5" class="mono" font-size="11.5" fill="#64748b">SYSTEM ARCHITECTURE &amp; MODULE TOPOLOGY · v1.3</text>
+    <text x="368" y="23.5" class="mono" font-size="11.5" fill="#64748b">SYSTEM ARCHITECTURE &amp; MODULE TOPOLOGY · v1.4</text>
 
     <!-- Top-Right Key Spec Badges -->
     <g transform="translate(762, 4)">
@@ -116,8 +116,8 @@
 
       <rect x="262" y="38" width="232" height="46" rx="8" fill="#f8fafc" stroke="#e2e8f0" />
       <circle cx="276" cy="51.5" r="3.5" fill="#059669" />
-      <text x="285" y="55" class="mono chip-txt" fill="#059669">/s/{code}/*（公开取件单）</text>
-      <text x="272" y="73" class="sans card-desc">单条 Bypass 免登直达 · 提取码/即焚</text>
+      <text x="285" y="55" class="mono chip-txt" fill="#059669">/s/* &amp; /assets/*（免登放行）</text>
+      <text x="272" y="73" class="sans card-desc">公开取件单 · iOS 桌面图标与 PWA 清单</text>
 
       <rect x="504" y="38" width="220" height="46" rx="8" fill="#f8fafc" stroke="#e2e8f0" />
       <circle cx="518" cy="51.5" r="3.5" fill="#0284c7" />
@@ -151,7 +151,7 @@
   <!-- ================= LAYER 02: FRONTEND SPA (web/src/) ================= -->
   <g transform="translate(36, 244)">
     <rect x="0" y="0" width="1208" height="202" rx="16" fill="#ffffff" fill-opacity="0.76" stroke="#cbd5e1" stroke-dasharray="5 4" />
-    <text x="16" y="21" class="mono layer-tag">02 / FRONTEND WORKSPACE · web/src/ (Vue 3.5 Composition API + TypeScript + Precision Studio CSS · 68 KB Gzip)</text>
+    <text x="16" y="21" class="mono layer-tag">02 / FRONTEND WORKSPACE · web/src/ (Vue 3.5 + TypeScript + PWA Full-Screen &amp; Dynamic Island Safe-Area · 76 KB Gzip)</text>
 
     <!-- 4 View Cards -->
     <!-- Card 1: HubView -->
@@ -173,9 +173,9 @@
       <text x="270" y="22" text-anchor="end" class="mono card-path">VaultView.vue</text>
       <line x1="14" y1="31" x2="270" y2="31" stroke="#f1f5f9" />
       <text x="14" y="49" class="sans card-desc">• Silo / Drive / 互传全局统一缩略图与列表</text>
-      <text x="14" y="67" class="sans card-desc">• 两级中文目录导航（图床/博客/音乐）</text>
-      <text x="14" y="85" class="sans card-desc">• 博客目录保护锁 · 手机双层防挤压卡片</text>
-      <text x="14" y="103" class="sans card-desc">• 全池灯箱预览 · 音频一键送入唱机</text>
+      <text x="14" y="67" class="sans card-desc">• Silo &amp; Drive 文件夹增删 · 博客保护锁</text>
+      <text x="14" y="85" class="sans card-desc">• 跨容器任意具体目录复制与移动 (Modal)</text>
+      <text x="14" y="103" class="sans card-desc">• 多选批量删除 / 批量移动 / 批量复制</text>
     </g>
 
     <!-- Card 3: MusicView -->
@@ -204,8 +204,8 @@
 
     <!-- Shared Reactive Store Bus -->
     <rect x="16" y="158" width="1176" height="32" rx="8" fill="#0b0d11" />
-    <text x="30" y="178" class="mono" font-size="11" font-weight="700" fill="#ffffff">composables/useDropStore.ts + DriveFolderSelect.vue</text>
-    <text x="415" y="178" class="sans" font-size="11.5" fill="#cbd5e1">响应式全局状态机 · EventSource SSE 实时推送 · 在线设备感知 · 锁屏唤醒静默补拉 · Canvas PNG 像素写入剪贴板</text>
+    <text x="30" y="178" class="mono" font-size="11" font-weight="700" fill="#ffffff">useDropStore.ts + VaultCopyModal.vue + DriveFolderSelect.vue</text>
+    <text x="468" y="178" class="sans" font-size="11.5" fill="#cbd5e1">响应式全局总线 · SSE 实时推送 · iPhone 灵动岛与 PWA 全屏适配 · 手机端防软键盘闪退</text>
   </g>
 
   <!-- Vertical Connectors Layer 02 -> Layer 03 -->
@@ -215,7 +215,7 @@
     <path d="M 1000 446 L 1000 474" marker-end="url(#arrow-emerald)" />
   </g>
   <text x="290" y="464" class="mono flow-lbl">/api/clips · /api/uploads/*</text>
-  <text x="650" y="464" class="mono flow-lbl" fill="#ea580c">/api/silo/* · /api/gdrive/* · /api/music/*</text>
+  <text x="650" y="464" class="mono flow-lbl" fill="#ea580c">/api/vault/copy · /api/silo/* · /api/gdrive/*</text>
   <text x="1010" y="464" class="mono flow-lbl" fill="#059669">/api/shares/* · /s/{code}/* · /api/qr</text>
 
   <!-- ================= LAYER 03: GO ZERO-DEPENDENCY BACKEND (cmd/ + internal/) ================= -->
@@ -229,12 +229,12 @@
       <rect width="276" height="130" rx="12" fill="#f8fafc" stroke="#cbd5e1" />
       <rect x="0" y="0" width="276" height="28" rx="12" fill="#0f172a" />
       <rect x="0" y="16" width="276" height="12" fill="#0f172a" />
-      <text x="12" y="18.5" class="mono" font-size="11" font-weight="700" fill="#ffffff">internal/server (server + vault)</text>
-      <text x="12" y="47" class="sans card-desc">• CF Access / Bearer 双模鉴权网关</text>
-      <text x="12" y="65" class="sans card-desc">• 20 MiB 分片接收与零二次上传后置转存</text>
-      <text x="12" y="83" class="sans card-desc">• 粘贴截图时间戳与 Drive -2 防覆盖</text>
-      <text x="12" y="101" class="sans card-desc">• SSE 多端事件广播与在线连接计数</text>
-      <text x="12" y="119" class="sans card-desc">• HTTP Range 音频/视频流式反代</text>
+      <text x="12" y="18.5" class="mono" font-size="11" font-weight="700" fill="#ffffff">internal/server (vault + pwa)</text>
+      <text x="12" y="47" class="sans card-desc">• CF Access 鉴权与 20 MiB 流式分片引擎</text>
+      <text x="12" y="65" class="sans card-desc">• 三池跨容器任意目录零中转复制/移动</text>
+      <text x="12" y="83" class="sans card-desc">• Silo (.keep) 与 Drive 文件夹安全增删</text>
+      <text x="12" y="101" class="sans card-desc">• 纯 Go 实时合成 180/512px 桌面 PNG 图标</text>
+      <text x="12" y="119" class="sans card-desc">• SSE 多端广播与 HTTP Range 流式反代</text>
     </g>
 
     <!-- Pkg 2: store -->

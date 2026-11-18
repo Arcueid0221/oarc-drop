@@ -17,6 +17,7 @@ import CopyPill from './CopyPill.vue'
 import DriveFolderSelect from './DriveFolderSelect.vue'
 import MorphDeleteBtn from './MorphDeleteBtn.vue'
 import UiIcon from './UiIcon.vue'
+import VaultCopyModal, { type VaultTransferSource } from './VaultCopyModal.vue'
 
 const store = useDropStore()
 
@@ -38,6 +39,32 @@ const driveFolderFilter = ref<string>('all')
 // Local private pool kind filter state
 const localKindFilter = ref<'all' | 'image' | 'file'>('all')
 
+// Folder creation & deletion states
+const showNewFolderBar = ref(false)
+const siloNewPrefix = ref<'images/' | 'drop/' | ''>('images/')
+const newFolderName = ref('')
+const creatingFolderBusy = ref(false)
+const deletingFolderBusy = ref(false)
+const folderDeleteConfirm = ref<{
+  pool: 'silo' | 'gdrive'
+  folder: string
+  fileCount: number
+  totalBytes: number
+} | null>(null)
+
+// Cross-pool / cross-folder copy & move modal state
+const transferModal = ref<{
+  items: VaultTransferSource[]
+  mode: 'copy' | 'move'
+} | null>(null)
+
+// Multi-select batch mode state
+const selectMode = ref(false)
+const selectedKeys = ref<Set<string>>(new Set())
+const batchDeleteConfirmOpen = ref(false)
+const batchDeleting = ref(false)
+const batchDeleteDone = ref(0)
+
 // Async busy states (for spinner indicators!)
 const deletingMap = ref<Record<string, boolean>>({})
 const renamingBusy = ref(false)
@@ -55,6 +82,7 @@ const previewObj = ref<{
   kind: string
   spec: string
   siloAudioKey?: string
+  transferSource?: VaultTransferSource
 } | null>(null)
 
 const renameTarget = ref<VaultObject | null>(null)
@@ -76,9 +104,10 @@ const activeVaultUploads = computed(() =>
   ),
 )
 
-// Semantic classification helpers for Silo folders
-function classifySiloCategory(obj: VaultObject): SiloCategory {
-  const f = (obj.folder || '/').replace(/^\/+|\/+$/g, '')
+// Semantic classification helpers for Silo folders & objects
+function classifyFolderName(rawFolder: string): SiloCategory {
+  const f = (rawFolder || '/').replace(/^\/+|\/+$/g, '')
+  if (!f || f === '/') return 'other'
   if (f === 'music' || f.startsWith('music/')) return 'music'
   if (
     f === 'articles' ||
@@ -102,12 +131,23 @@ function classifySiloCategory(obj: VaultObject): SiloCategory {
     f === 'videos' ||
     f.startsWith('videos/') ||
     f === 'drop' ||
-    f.startsWith('drop/') ||
-    obj.kind === 'video'
+    f.startsWith('drop/')
   ) {
     return 'imghost'
   }
   return 'other'
+}
+
+function classifySiloCategory(obj: VaultObject): SiloCategory {
+  const byDir = classifyFolderName(obj.folder || '/')
+  if (byDir !== 'other') return byDir
+  if (obj.kind === 'video') return 'imghost'
+  return 'other'
+}
+
+function isProtectedSiloFolder(rawFolder: string): boolean {
+  const cat = classifyFolderName(rawFolder)
+  return cat === 'blog' || cat === 'music'
 }
 
 function selectSiloCategory(cat: SiloCategory) {
@@ -137,6 +177,32 @@ const siloOverviewCount = computed(
     ).length,
 )
 
+const customOtherFolders = computed(() => {
+  const set = new Set<string>()
+  for (const f of store.siloFolders.value) {
+    const clean = (f || '').replace(/^\/+|\/+$/g, '')
+    if (!clean || clean === '/' || clean.endsWith('/thumbs') || clean === 'thumbs') continue
+    if (classifyFolderName(clean) === 'other') set.add(clean)
+  }
+  for (const it of store.siloObjects.value) {
+    if (classifySiloCategory(it) === 'other' && it.folder && it.folder !== '/') {
+      set.add(it.folder)
+    }
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b))
+})
+
+const customImghostSubfolders = computed(() => {
+  const standard = new Set(['images', 'videos', 'drop'])
+  const set = new Set<string>()
+  for (const f of store.siloFolders.value) {
+    const clean = (f || '').replace(/^\/+|\/+$/g, '')
+    if (!clean || standard.has(clean) || clean.endsWith('/thumbs')) continue
+    if (classifyFolderName(clean) === 'imghost') set.add(clean)
+  }
+  return Array.from(set).sort((a, b) => a.localeCompare(b))
+})
+
 const siloCategoryCounts = computed(() => {
   let imghost = 0
   let blog = 0
@@ -147,7 +213,6 @@ const siloCategoryCounts = computed(() => {
     if (c === 'imghost') imghost++
     else if (c === 'blog') blog++
     else if (c === 'music') {
-      // Count primary tracks + playlist covers cleanly; subtags expose covers/lyrics explicitly
       if (it.folder !== 'music/covers/tracks' && it.folder !== 'music/lyrics') music++
     } else other++
   }
@@ -157,15 +222,15 @@ const siloCategoryCounts = computed(() => {
 const activeCategoryDesc = computed(() => {
   switch (siloCategory.value) {
     case 'imghost':
-      return '图床与快传区（公网只读 CDN 加速 · 可直接改名或删除）'
+      return '图床与快传区（公网只读 CDN 加速 · 支持新建/删除子目录与跨容器复制移动）'
     case 'blog':
       return 'Aurora 博客生产目录（关联线上文章、相册、说说与主题配置 · 默认加锁防误删）'
     case 'music':
       return '博客自托管曲库（音频、歌单封面、单曲封面与 .lrc 滚动歌词）'
     case 'other':
-      return '其他自定义存储目录'
+      return '其他自定义存储目录（支持自由增删与文件归档）'
     default:
-      return 'Silo 对象存储全览（点击上方分类可展开具体文件夹用途说明）'
+      return 'Silo 对象存储全览（点击上方分类展开具体文件夹用途，也可新建自定义文件夹）'
   }
 })
 
@@ -197,8 +262,24 @@ const currentSiloSubTags = computed<SubTagOption[]>(() => {
       { key: 'tag:video', label: '视频', pathHint: 'video', desc: '视频流媒体文件', count: vidCnt },
       { key: 'dir:drop', label: '快传归档', pathHint: 'drop', desc: '收发台归档文件', count: dropCnt },
     ]
+    for (const sub of customImghostSubfolders.value) {
+      const cnt = all.filter((x) => x.folder === sub || x.folder.startsWith(`${sub}/`)).length
+      list.push({
+        key: `exact:${sub}`,
+        label: sub.split('/').slice(1).join('/') || sub,
+        pathHint: sub,
+        desc: `自定义子文件夹 ${sub}`,
+        count: cnt,
+      })
+    }
     if (otherImgHost > 0) {
-      list.push({ key: 'tag:other-imghost', label: '其他附件', pathHint: 'images/*', desc: '图床目录内其他格式文件', count: otherImgHost })
+      list.push({
+        key: 'tag:other-imghost',
+        label: '其他附件',
+        pathHint: 'images/*',
+        desc: '图床目录内其他格式文件',
+        count: otherImgHost,
+      })
     }
     return list
   }
@@ -235,19 +316,40 @@ const currentSiloSubTags = computed<SubTagOption[]>(() => {
 
   if (siloCategory.value === 'other') {
     const inCat = all.filter((x) => classifySiloCategory(x) === 'other')
-    const dirs = Array.from(new Set(inCat.map((x) => x.folder))).sort()
     return [
       { key: 'all', label: '全部其他目录', desc: '未归入标准分类的目录', count: inCat.length },
-      ...dirs.map((d) => ({
+      ...customOtherFolders.value.map((d) => ({
         key: `exact:${d}`,
         label: d,
         desc: '自定义目录',
-        count: inCat.filter((x) => x.folder === d).length,
+        count: inCat.filter((x) => x.folder === d || x.folder.startsWith(`${d}/`)).length,
       })),
     ]
   }
 
   return []
+})
+
+// Currently selected deletable folder (never allows deleting root or protected blog/music folders)
+const deletableSiloFolder = computed<string>(() => {
+  if (activePool.value !== 'silo') return ''
+  const sub = siloSubTag.value
+  if (sub === 'dir:drop') return 'drop'
+  if (sub.startsWith('exact:')) {
+    const folder = sub.slice(6)
+    if (folder && folder !== '/' && !isProtectedSiloFolder(folder)) {
+      return folder
+    }
+  }
+  return ''
+})
+
+const deletableDriveFolder = computed<string>(() => {
+  if (activePool.value !== 'gdrive') return ''
+  if (driveFolderFilter.value !== 'all' && driveFolderFilter.value !== '/') {
+    return driveFolderFilter.value
+  }
+  return ''
 })
 
 // Switch storage pool WITHOUT ever mutating vaultViewMode!
@@ -257,6 +359,9 @@ async function switchPool(key: PoolKey, enabled: boolean) {
     return
   }
   activePool.value = key
+  showNewFolderBar.value = false
+  newFolderName.value = ''
+  clearSelection()
   if (key === 'silo' && store.siloObjects.value.length === 0) {
     await refreshCurrent()
   } else if (key === 'gdrive' && store.gdriveFiles.value.length === 0) {
@@ -279,10 +384,105 @@ async function refreshCurrent() {
   }
 }
 
+async function submitCreateFolder() {
+  const raw = newFolderName.value.trim().replace(/^\/+|\/+$/g, '')
+  if (!raw || creatingFolderBusy.value) return
+  creatingFolderBusy.value = true
+  try {
+    if (activePool.value === 'silo') {
+      const full = `${siloNewPrefix.value}${raw}`.replace(/\/+/g, '/').replace(/^\/+|\/+$/g, '')
+      const created = await store.createSiloFolder(full)
+      if (created) {
+        newFolderName.value = ''
+        showNewFolderBar.value = false
+        const cat = classifyFolderName(created)
+        siloCategory.value = cat
+        siloSubTag.value = `exact:${created}`
+      }
+    } else if (activePool.value === 'gdrive') {
+      const created = await store.createGDriveFolder(raw)
+      if (created) {
+        newFolderName.value = ''
+        showNewFolderBar.value = false
+        driveFolderFilter.value = created
+      }
+    }
+  } finally {
+    creatingFolderBusy.value = false
+  }
+}
+
+async function requestDeleteActiveFolder() {
+  if (deletingFolderBusy.value) return
+  if (activePool.value === 'silo' && deletableSiloFolder.value) {
+    const target = deletableSiloFolder.value
+    deletingFolderBusy.value = true
+    try {
+      const res = await store.deleteSiloFolder(target, false)
+      if (res.ok) {
+        siloSubTag.value = 'all'
+      } else if (res.nonEmpty) {
+        folderDeleteConfirm.value = {
+          pool: 'silo',
+          folder: target,
+          fileCount: res.fileCount || 0,
+          totalBytes: res.totalBytes || 0,
+        }
+      }
+    } finally {
+      deletingFolderBusy.value = false
+    }
+  } else if (activePool.value === 'gdrive' && deletableDriveFolder.value) {
+    const target = deletableDriveFolder.value
+    deletingFolderBusy.value = true
+    try {
+      const res = await store.deleteGDriveFolder(target, false)
+      if (res.ok) {
+        driveFolderFilter.value = 'all'
+      } else if (res.nonEmpty) {
+        folderDeleteConfirm.value = {
+          pool: 'gdrive',
+          folder: target,
+          fileCount: res.fileCount || 0,
+          totalBytes: 0,
+        }
+      }
+    } finally {
+      deletingFolderBusy.value = false
+    }
+  }
+}
+
+async function confirmForceDeleteFolder() {
+  const pending = folderDeleteConfirm.value
+  if (!pending || deletingFolderBusy.value) return
+  deletingFolderBusy.value = true
+  try {
+    if (pending.pool === 'silo') {
+      const res = await store.deleteSiloFolder(pending.folder, true)
+      if (res.ok) {
+        folderDeleteConfirm.value = null
+        siloSubTag.value = 'all'
+      }
+    } else {
+      const res = await store.deleteGDriveFolder(pending.folder, true)
+      if (res.ok) {
+        folderDeleteConfirm.value = null
+        driveFolderFilter.value = 'all'
+      }
+    }
+  } finally {
+    deletingFolderBusy.value = false
+  }
+}
+
 function onKeyDown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     if (previewObj.value) previewObj.value = null
     else if (renameTarget.value && !renamingBusy.value) renameTarget.value = null
+    else if (folderDeleteConfirm.value && !deletingFolderBusy.value) folderDeleteConfirm.value = null
+    else if (batchDeleteConfirmOpen.value && !batchDeleting.value) batchDeleteConfirmOpen.value = false
+    else if (selectMode.value && !batchDeleting.value) exitSelectMode()
   }
 }
 
@@ -333,7 +533,7 @@ const filteredSilo = computed(() => {
         if (!(it.folder === p || it.folder.startsWith(`${p}/`))) return false
       } else if (sub.startsWith('exact:')) {
         const p = sub.slice(6)
-        if (it.folder !== p) return false
+        if (!(it.folder === p || it.folder.startsWith(`${p}/`))) return false
       }
     } else if (!q) {
       if (it.folder === 'music/covers/tracks' || it.folder === 'music/lyrics') return false
@@ -393,7 +593,201 @@ const activeTotalBytes = computed(() => {
   return localFileClips.value.reduce((acc, x) => acc + (x.size || 0), 0)
 })
 
+// Normalized current visible items for multi-select operations
+const visibleTransferItems = computed<VaultTransferSource[]>(() => {
+  if (activePool.value === 'silo') {
+    return filteredSilo.value.map((obj) => ({
+      storage: 'silo',
+      key: obj.key,
+      name: obj.name,
+      folder: obj.folder,
+      size: obj.size,
+      protected: obj.protected,
+    }))
+  }
+  if (activePool.value === 'gdrive') {
+    return filteredDrive.value.map((gd) => ({
+      storage: 'gdrive',
+      key: gd.path,
+      name: gd.name,
+      folder: gd.folder,
+      size: gd.size,
+    }))
+  }
+  return localFileClips.value.map((lc) => ({
+    storage: 'local',
+    key: lc.id,
+    name: lc.fileName || '互传文件',
+    size: lc.size || 0,
+  }))
+})
+
+function selToken(storage: PoolKey, key: string): string {
+  return `${storage}:${key}`
+}
+
+function isItemSelected(storage: PoolKey, key: string): boolean {
+  return selectedKeys.value.has(selToken(storage, key))
+}
+
+function toggleSelect(storage: PoolKey, key: string) {
+  const tok = selToken(storage, key)
+  const next = new Set(selectedKeys.value)
+  if (next.has(tok)) next.delete(tok)
+  else next.add(tok)
+  selectedKeys.value = next
+}
+
+function clearSelection() {
+  selectedKeys.value = new Set()
+}
+
+function toggleSelectMode() {
+  if (selectMode.value) {
+    exitSelectMode()
+  } else {
+    selectMode.value = true
+  }
+}
+
+function exitSelectMode() {
+  selectMode.value = false
+  clearSelection()
+}
+
+const allVisibleSelected = computed(() => {
+  if (visibleTransferItems.value.length === 0) return false
+  return visibleTransferItems.value.every((it) =>
+    selectedKeys.value.has(selToken(it.storage, it.key)),
+  )
+})
+
+function toggleSelectAllVisible() {
+  const next = new Set(selectedKeys.value)
+  if (allVisibleSelected.value) {
+    for (const it of visibleTransferItems.value) {
+      next.delete(selToken(it.storage, it.key))
+    }
+  } else {
+    for (const it of visibleTransferItems.value) {
+      next.add(selToken(it.storage, it.key))
+    }
+  }
+  selectedKeys.value = next
+}
+
+const selectedTransferItems = computed<VaultTransferSource[]>(() => {
+  const res: VaultTransferSource[] = []
+  for (const obj of store.siloObjects.value) {
+    if (selectedKeys.value.has(selToken('silo', obj.key))) {
+      res.push({
+        storage: 'silo',
+        key: obj.key,
+        name: obj.name,
+        folder: obj.folder,
+        size: obj.size,
+        protected: obj.protected,
+      })
+    }
+  }
+  for (const gd of store.gdriveFiles.value) {
+    if (selectedKeys.value.has(selToken('gdrive', gd.path))) {
+      res.push({
+        storage: 'gdrive',
+        key: gd.path,
+        name: gd.name,
+        folder: gd.folder,
+        size: gd.size,
+      })
+    }
+  }
+  for (const lc of store.clips.value) {
+    if (selectedKeys.value.has(selToken('local', lc.id))) {
+      res.push({
+        storage: 'local',
+        key: lc.id,
+        name: lc.fileName || '互传文件',
+        size: lc.size || 0,
+      })
+    }
+  }
+  return res
+})
+
+const selectedTotalBytes = computed(() =>
+  selectedTransferItems.value.reduce((acc, x) => acc + (x.size || 0), 0),
+)
+
+const selectedProtectedCount = computed(
+  () => selectedTransferItems.value.filter((x) => Boolean(x.protected)).length,
+)
+
+function openSingleTransfer(src: VaultTransferSource, mode: 'copy' | 'move' = 'copy') {
+  transferModal.value = { items: [src], mode }
+}
+
+function openBatchTransfer(mode: 'copy' | 'move') {
+  if (selectedTransferItems.value.length === 0) return
+  transferModal.value = { items: [...selectedTransferItems.value], mode }
+}
+
+function onTransferCompleted(payload: { mode: 'copy' | 'move'; succeeded: number }) {
+  transferModal.value = null
+  if (payload.mode === 'move' && selectMode.value) {
+    exitSelectMode()
+  }
+}
+
+async function executeBatchDelete() {
+  const list = [...selectedTransferItems.value]
+  if (list.length === 0 || batchDeleting.value) return
+  batchDeleting.value = true
+  batchDeleteDone.value = 0
+  let succeeded = 0
+
+  try {
+    for (const it of list) {
+      if (it.storage === 'silo') {
+        const res = await fetch(
+          `/api/silo/object?key=${encodeURIComponent(it.key)}&force=${it.protected ? '1' : '0'}`,
+          { method: 'DELETE' },
+        )
+        if (res.ok) {
+          store.siloObjects.value = store.siloObjects.value.filter((x) => x.key !== it.key)
+          succeeded++
+        }
+      } else if (it.storage === 'gdrive') {
+        const res = await fetch(`/api/gdrive/file?path=${encodeURIComponent(it.key)}`, {
+          method: 'DELETE',
+        })
+        if (res.ok) {
+          store.gdriveFiles.value = store.gdriveFiles.value.filter((x) => x.path !== it.key)
+          succeeded++
+        }
+      } else {
+        const res = await fetch(`/api/clips/${it.key}`, { method: 'DELETE' })
+        if (res.ok) {
+          store.clips.value = store.clips.value.filter((c) => c.id !== it.key)
+          succeeded++
+        }
+      }
+      batchDeleteDone.value++
+    }
+    showToast(`已批量删除 ${succeeded} 个文件`)
+    batchDeleteConfirmOpen.value = false
+    exitSelectMode()
+    if (list.some((x) => x.storage === 'silo')) {
+      void store.loadMedia(true)
+    }
+  } finally {
+    batchDeleting.value = false
+  }
+}
+
 function resolveUploadSiloPrefix(): string {
+  if (siloSubTag.value.startsWith('exact:')) {
+    return `${siloSubTag.value.slice(6)}/`
+  }
   if (siloCategory.value === 'imghost') {
     if (siloSubTag.value === 'dir:drop') return 'drop/'
     if (siloSubTag.value === 'tag:video') return 'videos/'
@@ -401,9 +795,6 @@ function resolveUploadSiloPrefix(): string {
   }
   if (siloCategory.value === 'blog' && siloSubTag.value.startsWith('dir:')) {
     return `${siloSubTag.value.slice(4)}/`
-  }
-  if (siloCategory.value === 'music' && siloSubTag.value.startsWith('exact:')) {
-    return `${siloSubTag.value.slice(6)}/`
   }
   return 'images/'
 }
@@ -624,6 +1015,30 @@ async function archiveLocalToDrive(lc: ClipItem, folder: string) {
   }
 }
 
+function handleSiloCardClick(item: VaultObject) {
+  if (selectMode.value) {
+    toggleSelect('silo', item.key)
+    return
+  }
+  openPreviewSilo(item)
+}
+
+function handleDriveCardClick(gd: GDriveFile) {
+  if (selectMode.value) {
+    toggleSelect('gdrive', gd.path)
+    return
+  }
+  openPreviewDrive(gd)
+}
+
+function handleLocalCardClick(lc: ClipItem) {
+  if (selectMode.value) {
+    toggleSelect('local', lc.id)
+    return
+  }
+  openPreviewLocal(lc)
+}
+
 function openPreviewSilo(item: VaultObject) {
   if (item.kind === 'audio' || item.kind === 'video') {
     store.pauseAudio()
@@ -637,6 +1052,14 @@ function openPreviewSilo(item: VaultObject) {
     kind: item.kind,
     spec: `${describeSiloFolder(item.folder)} · ${formatBytes(item.size)} · ${formatTimeShort(item.lastModified)}`,
     siloAudioKey: item.kind === 'audio' ? item.key : undefined,
+    transferSource: {
+      storage: 'silo',
+      key: item.key,
+      name: item.name,
+      folder: item.folder,
+      size: item.size,
+      protected: item.protected,
+    },
   }
 }
 
@@ -651,6 +1074,13 @@ function openPreviewDrive(gd: GDriveFile) {
     size: gd.size,
     kind: gd.kind,
     spec: `Drive: ${gd.path} · ${formatBytes(gd.size)} · ${formatTimeShort(gd.lastModified)}`,
+    transferSource: {
+      storage: 'gdrive',
+      key: gd.path,
+      name: gd.name,
+      folder: gd.folder,
+      size: gd.size,
+    },
   }
 }
 
@@ -675,6 +1105,12 @@ function openPreviewLocal(lc: ClipItem) {
     size: lc.size || 0,
     kind,
     spec: `私密互传 · ${formatBytes(lc.size)} · ${formatTimeShort(lc.createdAt)}`,
+    transferSource: {
+      storage: 'local',
+      key: lc.id,
+      name: lc.fileName || '文件',
+      size: lc.size || 0,
+    },
   }
 }
 
@@ -687,7 +1123,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
 </script>
 
 <template>
-  <div class="vault-page">
+  <div class="vault-page" :class="{ 'has-batch-dock': selectMode && selectedTransferItems.length > 0 }">
     <header class="pane-header">
       <div class="pane-title-wrap">
         <h1 class="pane-title">文件柜</h1>
@@ -735,6 +1171,25 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
         </div>
 
         <div class="vt-right">
+          <button
+            type="button"
+            class="pill-btn"
+            :class="{ 'pill-btn--solid': selectMode }"
+            @click="toggleSelectMode"
+          >
+            <UiIcon name="check-square" :size="14" />
+            <span>{{ selectMode ? '退出多选' : '多选' }}</span>
+          </button>
+
+          <button
+            v-if="selectMode && visibleTransferItems.length > 0"
+            type="button"
+            class="pill-btn"
+            @click="toggleSelectAllVisible"
+          >
+            <span>{{ allVisibleSelected ? '取消全选' : `全选 (${visibleTransferItems.length})` }}</span>
+          </button>
+
           <button type="button" class="pill-btn pill-btn--solid" @click="uploadInput?.click()">
             <UiIcon
               :name="activeVaultUploads.length > 0 ? 'spinner' : 'plus'"
@@ -783,9 +1238,9 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
         </div>
       </TransitionGroup>
 
-      <!-- Pool-Specific Semantic Info & Directory Filter Bar (smoothly switches with storage pool!) -->
+      <!-- Pool-Specific Semantic Info & Directory Filter Bar -->
       <Transition name="info-swap" mode="out-in">
-        <!-- 1. SILO TWO-LEVEL SEMANTIC FOLDER GUIDE -->
+        <!-- 1. SILO TWO-LEVEL SEMANTIC FOLDER GUIDE + FOLDER CRUD -->
         <section v-if="activePool === 'silo'" key="info-silo" class="glass-box pool-info-panel">
           <div class="cat-top-row">
             <div class="cat-pills">
@@ -833,7 +1288,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
               </button>
 
               <button
-                v-if="siloCategoryCounts.other > 0"
+                v-if="siloCategoryCounts.other > 0 || customOtherFolders.length > 0"
                 type="button"
                 class="cat-btn"
                 :class="{ 'is-on': siloCategory === 'other' }"
@@ -845,10 +1300,76 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
               </button>
             </div>
 
-            <span class="pool-stat mono">{{ activeCount }} 项 · {{ formatBytes(activeTotalBytes) }}</span>
+            <div class="pool-head-right">
+              <button
+                v-if="deletableSiloFolder"
+                type="button"
+                class="folder-del-btn"
+                :disabled="deletingFolderBusy"
+                @click="requestDeleteActiveFolder"
+              >
+                <UiIcon
+                  :name="deletingFolderBusy ? 'spinner' : 'trash'"
+                  :size="12.5"
+                  :class="{ 'spin-anim': deletingFolderBusy }"
+                />
+                <span>删除目录 {{ deletableSiloFolder }}</span>
+              </button>
+
+              <button
+                type="button"
+                class="folder-add-btn"
+                :class="{ 'is-open': showNewFolderBar }"
+                @click="showNewFolderBar = !showNewFolderBar"
+              >
+                <UiIcon name="folder-plus" :size="13.5" />
+                <span>新建文件夹</span>
+              </button>
+
+              <span class="pool-stat mono">{{ activeCount }} 项 · {{ formatBytes(activeTotalBytes) }}</span>
+            </div>
           </div>
 
           <div class="cat-desc-line">{{ activeCategoryDesc }}</div>
+
+          <!-- Inline Silo New Folder Creator -->
+          <Transition name="sub-drawer">
+            <form v-if="showNewFolderBar" class="new-folder-bar" @submit.prevent="submitCreateFolder">
+              <div class="nf-prefixes">
+                <button
+                  v-for="pf in [
+                    { v: 'images/' as const, l: '图床 images/' },
+                    { v: 'drop/' as const, l: '快传 drop/' },
+                    { v: '' as const, l: '自定义根目录' },
+                  ]"
+                  :key="pf.l"
+                  type="button"
+                  class="nf-chip mono"
+                  :class="{ 'is-on': siloNewPrefix === pf.v }"
+                  @click="siloNewPrefix = pf.v"
+                >
+                  {{ pf.l }}
+                </button>
+              </div>
+              <div class="nf-input-row">
+                <span v-if="siloNewPrefix" class="nf-prefix-tag mono">{{ siloNewPrefix }}</span>
+                <input
+                  v-model="newFolderName"
+                  class="nf-input mono"
+                  :placeholder="siloNewPrefix ? '输入子目录名（如 memes 或 2026）' : '输入目录路径（如 archive/docs）'"
+                  :disabled="creatingFolderBusy"
+                />
+                <button
+                  type="submit"
+                  class="pill-btn pill-btn--solid pill-btn--mini"
+                  :disabled="creatingFolderBusy || !newFolderName.trim()"
+                >
+                  <UiIcon v-if="creatingFolderBusy" name="spinner" :size="12.5" class="spin-anim" />
+                  <span>{{ creatingFolderBusy ? '创建中…' : '创建目录' }}</span>
+                </button>
+              </div>
+            </form>
+          </Transition>
 
           <!-- Second-level Semantic Sub-Tags Drawer -->
           <Transition name="sub-drawer">
@@ -870,7 +1391,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
           </Transition>
         </section>
 
-        <!-- 2. GOOGLE DRIVE SUBFOLDER & INFO BAR -->
+        <!-- 2. GOOGLE DRIVE SUBFOLDER & INFO BAR + FOLDER CRUD -->
         <section v-else-if="activePool === 'gdrive'" key="info-gdrive" class="glass-box pool-info-panel">
           <div class="cat-top-row">
             <div class="cat-pills">
@@ -896,11 +1417,61 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
               </button>
             </div>
 
-            <span class="pool-stat mono">{{ activeCount }} 项 · {{ formatBytes(activeTotalBytes) }}</span>
+            <div class="pool-head-right">
+              <button
+                v-if="deletableDriveFolder"
+                type="button"
+                class="folder-del-btn"
+                :disabled="deletingFolderBusy"
+                @click="requestDeleteActiveFolder"
+              >
+                <UiIcon
+                  :name="deletingFolderBusy ? 'spinner' : 'trash'"
+                  :size="12.5"
+                  :class="{ 'spin-anim': deletingFolderBusy }"
+                />
+                <span>删除目录 {{ deletableDriveFolder }}</span>
+              </button>
+
+              <button
+                type="button"
+                class="folder-add-btn"
+                :class="{ 'is-open': showNewFolderBar }"
+                @click="showNewFolderBar = !showNewFolderBar"
+              >
+                <UiIcon name="folder-plus" :size="13.5" />
+                <span>新建文件夹</span>
+              </button>
+
+              <span class="pool-stat mono">{{ activeCount }} 项 · {{ formatBytes(activeTotalBytes) }}</span>
+            </div>
           </div>
+
           <div class="cat-desc-line">
-            Google Drive 隔离归档目录（<span class="mono">{{ store.status.value?.gdriveTarget || 'gdrive:OArc-Drop' }}</span> · 同名上传自动加后缀防覆盖）
+            Google Drive 隔离归档目录（<span class="mono">{{ store.status.value?.gdriveTarget || 'gdrive:OArc-Drop' }}</span> · 支持新建/删除子文件夹与跨容器复制移动）
           </div>
+
+          <Transition name="sub-drawer">
+            <form v-if="showNewFolderBar" class="new-folder-bar" @submit.prevent="submitCreateFolder">
+              <div class="nf-input-row">
+                <span class="nf-prefix-tag mono">OArc-Drop/</span>
+                <input
+                  v-model="newFolderName"
+                  class="nf-input"
+                  placeholder="输入要新建的 Drive 子文件夹名（如 2026-资料）"
+                  :disabled="creatingFolderBusy"
+                />
+                <button
+                  type="submit"
+                  class="pill-btn pill-btn--solid pill-btn--mini"
+                  :disabled="creatingFolderBusy || !newFolderName.trim()"
+                >
+                  <UiIcon v-if="creatingFolderBusy" name="spinner" :size="12.5" class="spin-anim" />
+                  <span>{{ creatingFolderBusy ? '创建中…' : '创建目录' }}</span>
+                </button>
+              </div>
+            </form>
+          </Transition>
         </section>
 
         <!-- 3. LOCAL PRIVATE POOL FILTER & INFO BAR -->
@@ -926,7 +1497,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
             <span class="pool-stat mono">{{ activeCount }} 项 · {{ formatBytes(activeTotalBytes) }}</span>
           </div>
           <div class="cat-desc-line">
-            本机私密互传池（仅经过 Cloudflare Access 验证的本人设备可见 · 可随时一键转存图床或 Google Drive）
+            本机私密互传池（仅经过 Cloudflare Access 验证的本人设备可见 · 支持一键复制或移动到 Silo / Drive 任意具体文件夹）
           </div>
         </section>
       </Transition>
@@ -943,8 +1514,19 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
             v-for="obj in filteredSilo"
             :key="obj.key"
             class="lens-tile"
-            @click="openPreviewSilo(obj)"
+            :class="{ 'is-selected': isItemSelected('silo', obj.key) }"
+            @click="handleSiloCardClick(obj)"
           >
+            <button
+              v-if="selectMode"
+              type="button"
+              class="sel-badge"
+              :class="{ 'is-checked': isItemSelected('silo', obj.key) }"
+              @click.stop="toggleSelect('silo', obj.key)"
+            >
+              <UiIcon v-if="isItemSelected('silo', obj.key)" name="check" :size="12.5" />
+            </button>
+
             <img v-if="obj.thumbUrl" :src="obj.thumbUrl" :alt="obj.name" loading="lazy" />
             <div v-else class="non-img-tile">
               <UiIcon :name="iconForKind(obj.kind)" :size="28" />
@@ -952,7 +1534,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
             </div>
 
             <button
-              v-if="obj.kind === 'audio'"
+              v-if="obj.kind === 'audio' && !selectMode"
               type="button"
               class="tile-audio-badge mono"
               title="送入音乐厅唱机播放"
@@ -963,7 +1545,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
             </button>
 
             <div class="tile-scrim" @click.stop>
-              <div class="tile-info" @click="openPreviewSilo(obj)">
+              <div class="tile-info" @click="handleSiloCardClick(obj)">
                 <div class="tile-name">
                   <UiIcon v-if="obj.protected" name="lock" :size="11" class="inline-lock" />
                   <span>{{ obj.name }}</span>
@@ -971,7 +1553,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
                 <div class="tile-meta">{{ describeSiloFolder(obj.folder) }} · {{ formatBytes(obj.size) }}</div>
               </div>
 
-              <div class="tile-btns">
+              <div v-if="!selectMode" class="tile-btns">
                 <CopyPill
                   v-if="obj.publicUrl && obj.kind === 'image'"
                   :text="formatMarkdownImage(obj.name, obj.publicUrl)"
@@ -986,6 +1568,23 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
                   copied-label="已复制"
                   compact
                 />
+                <button
+                  type="button"
+                  class="scrim-circle"
+                  title="复制或移动到其他容器/文件夹"
+                  @click="
+                    openSingleTransfer({
+                      storage: 'silo',
+                      key: obj.key,
+                      name: obj.name,
+                      folder: obj.folder,
+                      size: obj.size,
+                      protected: obj.protected,
+                    })
+                  "
+                >
+                  <UiIcon name="move" :size="12.5" />
+                </button>
                 <a class="scrim-circle" :href="`${obj.streamUrl}&download=1`" title="下载">
                   <UiIcon name="download" :size="12.5" />
                 </a>
@@ -1022,10 +1621,25 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
           </article>
         </div>
 
-        <!-- Unified List Mode (Two-row mobile-safe layout — zero 1-char vertical squishing!) -->
+        <!-- Unified List Mode -->
         <div v-else class="file-list">
-          <div v-for="obj in filteredSilo" :key="obj.key" class="glass-box file-row">
-            <div class="fr-main" @click="openPreviewSilo(obj)">
+          <div
+            v-for="obj in filteredSilo"
+            :key="obj.key"
+            class="glass-box file-row"
+            :class="{ 'is-selected': isItemSelected('silo', obj.key) }"
+          >
+            <div class="fr-main" @click="handleSiloCardClick(obj)">
+              <button
+                v-if="selectMode"
+                type="button"
+                class="sel-check-inline"
+                :class="{ 'is-checked': isItemSelected('silo', obj.key) }"
+                @click.stop="toggleSelect('silo', obj.key)"
+              >
+                <UiIcon v-if="isItemSelected('silo', obj.key)" name="check" :size="12" />
+              </button>
+
               <img
                 v-if="obj.thumbUrl"
                 :src="obj.thumbUrl"
@@ -1048,7 +1662,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
               </div>
             </div>
 
-            <div class="fr-acts">
+            <div v-if="!selectMode" class="fr-acts">
               <button
                 v-if="obj.kind === 'audio'"
                 type="button"
@@ -1072,6 +1686,23 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
                 copied-label="已复制"
                 compact
               />
+              <button
+                type="button"
+                class="mini-act"
+                title="复制或移动到其他容器/文件夹"
+                @click="
+                  openSingleTransfer({
+                    storage: 'silo',
+                    key: obj.key,
+                    name: obj.name,
+                    folder: obj.folder,
+                    size: obj.size,
+                    protected: obj.protected,
+                  })
+                "
+              >
+                <UiIcon name="move" :size="14" />
+              </button>
               <a class="mini-act" :href="`${obj.streamUrl}&download=1`" title="下载">
                 <UiIcon name="download" :size="14" />
               </a>
@@ -1115,8 +1746,19 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
             v-for="gd in filteredDrive"
             :key="gd.path"
             class="lens-tile"
-            @click="openPreviewDrive(gd)"
+            :class="{ 'is-selected': isItemSelected('gdrive', gd.path) }"
+            @click="handleDriveCardClick(gd)"
           >
+            <button
+              v-if="selectMode"
+              type="button"
+              class="sel-badge"
+              :class="{ 'is-checked': isItemSelected('gdrive', gd.path) }"
+              @click.stop="toggleSelect('gdrive', gd.path)"
+            >
+              <UiIcon v-if="isItemSelected('gdrive', gd.path)" name="check" :size="12.5" />
+            </button>
+
             <img
               v-if="gd.kind === 'image'"
               :src="`${gd.streamUrl}&size=${gd.size}`"
@@ -1129,7 +1771,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
             </div>
 
             <div class="tile-scrim" @click.stop>
-              <div class="tile-info" @click="openPreviewDrive(gd)">
+              <div class="tile-info" @click="handleDriveCardClick(gd)">
                 <div class="tile-name">
                   <span>{{ gd.name }}</span>
                 </div>
@@ -1138,7 +1780,23 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
                 </div>
               </div>
 
-              <div class="tile-btns">
+              <div v-if="!selectMode" class="tile-btns">
+                <button
+                  type="button"
+                  class="scrim-circle"
+                  title="复制或移动到其他容器/文件夹"
+                  @click="
+                    openSingleTransfer({
+                      storage: 'gdrive',
+                      key: gd.path,
+                      name: gd.name,
+                      folder: gd.folder,
+                      size: gd.size,
+                    })
+                  "
+                >
+                  <UiIcon name="move" :size="12.5" />
+                </button>
                 <a class="scrim-circle" :href="`${gd.streamUrl}&size=${gd.size}&download=1`" title="下载">
                   <UiIcon name="download" :size="12.5" />
                 </a>
@@ -1168,8 +1826,23 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
 
         <!-- Unified List Mode for Google Drive -->
         <div v-else class="file-list">
-          <div v-for="gd in filteredDrive" :key="gd.path" class="glass-box file-row">
-            <div class="fr-main" @click="openPreviewDrive(gd)">
+          <div
+            v-for="gd in filteredDrive"
+            :key="gd.path"
+            class="glass-box file-row"
+            :class="{ 'is-selected': isItemSelected('gdrive', gd.path) }"
+          >
+            <div class="fr-main" @click="handleDriveCardClick(gd)">
+              <button
+                v-if="selectMode"
+                type="button"
+                class="sel-check-inline"
+                :class="{ 'is-checked': isItemSelected('gdrive', gd.path) }"
+                @click.stop="toggleSelect('gdrive', gd.path)"
+              >
+                <UiIcon v-if="isItemSelected('gdrive', gd.path)" name="check" :size="12" />
+              </button>
+
               <img
                 v-if="gd.kind === 'image'"
                 :src="`${gd.streamUrl}&size=${gd.size}`"
@@ -1190,7 +1863,23 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
                 </div>
               </div>
             </div>
-            <div class="fr-acts">
+            <div v-if="!selectMode" class="fr-acts">
+              <button
+                type="button"
+                class="pill-btn pill-btn--mini"
+                @click="
+                  openSingleTransfer({
+                    storage: 'gdrive',
+                    key: gd.path,
+                    name: gd.name,
+                    folder: gd.folder,
+                    size: gd.size,
+                  })
+                "
+              >
+                <UiIcon name="move" :size="13.5" />
+                <span>复制/移动</span>
+              </button>
               <a
                 class="pill-btn pill-btn--mini"
                 :href="`${gd.streamUrl}&size=${gd.size}&download=1`"
@@ -1234,8 +1923,19 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
             v-for="lc in localFileClips"
             :key="lc.id"
             class="lens-tile"
-            @click="openPreviewLocal(lc)"
+            :class="{ 'is-selected': isItemSelected('local', lc.id) }"
+            @click="handleLocalCardClick(lc)"
           >
+            <button
+              v-if="selectMode"
+              type="button"
+              class="sel-badge"
+              :class="{ 'is-checked': isItemSelected('local', lc.id) }"
+              @click.stop="toggleSelect('local', lc.id)"
+            >
+              <UiIcon v-if="isItemSelected('local', lc.id)" name="check" :size="12.5" />
+            </button>
+
             <img
               v-if="lc.kind === 'image'"
               :src="`/api/clips/${lc.id}/raw`"
@@ -1250,14 +1950,14 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
             </div>
 
             <div class="tile-scrim" @click.stop>
-              <div class="tile-info" @click="openPreviewLocal(lc)">
+              <div class="tile-info" @click="handleLocalCardClick(lc)">
                 <div class="tile-name">
                   <span>{{ lc.fileName }}</span>
                 </div>
                 <div class="tile-meta mono">私密互传 · {{ formatBytes(lc.size) }}</div>
               </div>
 
-              <div class="tile-btns">
+              <div v-if="!selectMode" class="tile-btns">
                 <CopyPill
                   v-if="lc.publicUrl && lc.kind === 'image'"
                   :text="formatMarkdownImage(lc.fileName || 'image', lc.publicUrl)"
@@ -1278,6 +1978,21 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
                     :class="{ 'spin-anim': promotingLocalSilo[lc.id] }"
                   />
                   <span>图床</span>
+                </button>
+                <button
+                  type="button"
+                  class="scrim-circle"
+                  title="复制或移动到指定文件夹"
+                  @click="
+                    openSingleTransfer({
+                      storage: 'local',
+                      key: lc.id,
+                      name: lc.fileName || '文件',
+                      size: lc.size || 0,
+                    })
+                  "
+                >
+                  <UiIcon name="move" :size="12.5" />
                 </button>
                 <a class="scrim-circle" :href="`/api/clips/${lc.id}/raw?download=1`" title="下载">
                   <UiIcon name="download" :size="12.5" />
@@ -1308,8 +2023,23 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
 
         <!-- Unified List Mode for Local Private Pool -->
         <div v-else class="file-list">
-          <div v-for="lc in localFileClips" :key="lc.id" class="glass-box file-row">
-            <div class="fr-main" @click="openPreviewLocal(lc)">
+          <div
+            v-for="lc in localFileClips"
+            :key="lc.id"
+            class="glass-box file-row"
+            :class="{ 'is-selected': isItemSelected('local', lc.id) }"
+          >
+            <div class="fr-main" @click="handleLocalCardClick(lc)">
+              <button
+                v-if="selectMode"
+                type="button"
+                class="sel-check-inline"
+                :class="{ 'is-checked': isItemSelected('local', lc.id) }"
+                @click.stop="toggleSelect('local', lc.id)"
+              >
+                <UiIcon v-if="isItemSelected('local', lc.id)" name="check" :size="12" />
+              </button>
+
               <img
                 v-if="lc.kind === 'image'"
                 :src="`/api/clips/${lc.id}/raw`"
@@ -1330,7 +2060,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
                 </div>
               </div>
             </div>
-            <div class="fr-acts">
+            <div v-if="!selectMode" class="fr-acts">
               <template v-if="store.status.value?.siloEnabled">
                 <CopyPill
                   v-if="lc.publicUrl"
@@ -1363,6 +2093,22 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
                 @select="archiveLocalToDrive(lc, $event)"
               />
 
+              <button
+                type="button"
+                class="pill-btn pill-btn--mini"
+                @click="
+                  openSingleTransfer({
+                    storage: 'local',
+                    key: lc.id,
+                    name: lc.fileName || '文件',
+                    size: lc.size || 0,
+                  })
+                "
+              >
+                <UiIcon name="move" :size="13.5" />
+                <span>复制/移动</span>
+              </button>
+
               <a class="pill-btn pill-btn--mini" :href="`/api/clips/${lc.id}/raw?download=1`">
                 <UiIcon name="download" :size="13.5" />
                 <span>下载</span>
@@ -1391,6 +2137,138 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
         </div>
       </template>
     </div>
+
+    <!-- Floating Multi-Select Batch Action Dock -->
+    <Teleport to="body">
+      <Transition name="dock-pop">
+        <div
+          v-if="selectMode && selectedTransferItems.length > 0"
+          class="liquid-chrome batch-dock"
+          :class="{ 'is-above-player': Boolean(store.currentTrack.value) }"
+        >
+          <div class="bd-info">
+            <span class="bd-cnt">已选 {{ selectedTransferItems.length }} 项</span>
+            <span class="bd-bytes mono">{{ formatBytes(selectedTotalBytes) }}</span>
+          </div>
+
+          <div class="bd-acts">
+            <button type="button" class="pill-btn pill-btn--mini" @click="openBatchTransfer('copy')">
+              <UiIcon name="copy" :size="13" />
+              <span>复制到…</span>
+            </button>
+            <button type="button" class="pill-btn pill-btn--mini" @click="openBatchTransfer('move')">
+              <UiIcon name="move" :size="13.5" />
+              <span>移动到…</span>
+            </button>
+            <button
+              type="button"
+              class="pill-btn pill-btn--mini bd-danger-btn"
+              @click="batchDeleteConfirmOpen = true"
+            >
+              <UiIcon name="trash" :size="13" />
+              <span>批量删除</span>
+            </button>
+            <button type="button" class="icon-circle-btn bd-close" title="取消选择" @click="exitSelectMode">
+              <UiIcon name="close" :size="13.5" />
+            </button>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Cross-Pool / Cross-Folder Copy & Move Modal -->
+    <VaultCopyModal
+      v-if="transferModal"
+      :items="transferModal.items"
+      :initial-mode="transferModal.mode"
+      @close="transferModal = null"
+      @completed="onTransferCompleted"
+    />
+
+    <!-- Non-Empty Folder Deletion Confirmation Modal -->
+    <Teleport to="body">
+      <Transition name="lens-modal">
+        <div
+          v-if="folderDeleteConfirm"
+          class="modal-backdrop"
+          @click.self="!deletingFolderBusy && (folderDeleteConfirm = null)"
+        >
+          <div class="liquid-chrome rename-box">
+            <div class="rn-title">删除非空文件夹</div>
+            <div class="rn-sub mono">
+              {{ folderDeleteConfirm.pool === 'silo' ? `Silo · ${folderDeleteConfirm.folder}` : `Drive · OArc-Drop/${folderDeleteConfirm.folder}` }}
+            </div>
+            <div class="rn-warn">
+              该文件夹内仍有 <strong>{{ folderDeleteConfirm.fileCount }}</strong> 个文件
+              <template v-if="folderDeleteConfirm.totalBytes > 0">
+                （合计 {{ formatBytes(folderDeleteConfirm.totalBytes) }}）
+              </template>
+              ，确认删除将连同文件夹内所有内容一并永久移除。
+            </div>
+            <div class="rn-btns">
+              <button
+                type="button"
+                class="pill-btn"
+                :disabled="deletingFolderBusy"
+                @click="folderDeleteConfirm = null"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                class="pill-btn bd-danger-solid"
+                :disabled="deletingFolderBusy"
+                @click="confirmForceDeleteFolder"
+              >
+                <UiIcon v-if="deletingFolderBusy" name="spinner" :size="13.5" class="spin-anim" />
+                <span>{{ deletingFolderBusy ? '正在清空删除…' : '强制清空并删除' }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+
+    <!-- Batch Multi-Delete Confirmation Modal -->
+    <Teleport to="body">
+      <Transition name="lens-modal">
+        <div
+          v-if="batchDeleteConfirmOpen"
+          class="modal-backdrop"
+          @click.self="!batchDeleting && (batchDeleteConfirmOpen = false)"
+        >
+          <div class="liquid-chrome rename-box">
+            <div class="rn-title">确认批量删除 {{ selectedTransferItems.length }} 个文件？</div>
+            <div class="rn-sub mono">合计大小：{{ formatBytes(selectedTotalBytes) }}</div>
+            <div v-if="selectedProtectedCount > 0" class="rn-warn">
+              注意：其中包含 {{ selectedProtectedCount }} 个博客或音乐加锁生产文件，删除后对应公网资源将失效。
+            </div>
+            <div v-if="batchDeleting" class="rn-sub mono">
+              正在删除 {{ batchDeleteDone }} / {{ selectedTransferItems.length }}…
+            </div>
+            <div class="rn-btns">
+              <button
+                type="button"
+                class="pill-btn"
+                :disabled="batchDeleting"
+                @click="batchDeleteConfirmOpen = false"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                class="pill-btn bd-danger-solid"
+                :disabled="batchDeleting"
+                @click="executeBatchDelete"
+              >
+                <UiIcon v-if="batchDeleting" name="spinner" :size="13.5" class="spin-anim" />
+                <span>{{ batchDeleting ? '批量删除中…' : '确认永久删除' }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
 
     <!-- Rename Modal -->
     <Teleport to="body">
@@ -1461,6 +2339,18 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
                   <span>送入音乐厅唱机</span>
                 </button>
                 <button
+                  v-if="previewObj.transferSource"
+                  type="button"
+                  class="pill-btn"
+                  @click="
+                    openSingleTransfer(previewObj.transferSource);
+                    previewObj = null
+                  "
+                >
+                  <UiIcon name="move" :size="14" />
+                  <span>复制 / 移动…</span>
+                </button>
+                <button
                   v-if="previewObj.kind === 'image'"
                   type="button"
                   class="pill-btn"
@@ -1501,6 +2391,10 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
 </template>
 
 <style scoped>
+.vault-page.has-batch-dock {
+  padding-bottom: 72px;
+}
+
 .vault-top-acts .tab-pill-group {
   min-width: 288px;
 }
@@ -1534,6 +2428,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
 
 .vt-right {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
@@ -1653,6 +2548,112 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   opacity: 0.72;
 }
 
+.pool-head-right {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+}
+
+.folder-add-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-card);
+  color: var(--ink-1);
+  font-size: 0.74rem;
+  font-weight: 590;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+
+.folder-add-btn:hover,
+.folder-add-btn.is-open {
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
+.folder-del-btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid rgba(220, 38, 38, 0.28);
+  background: var(--danger-bg);
+  color: var(--danger-fg);
+  font-size: 0.73rem;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+}
+
+.new-folder-bar {
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.nf-prefixes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.nf-chip {
+  height: 25px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-recessed);
+  color: var(--ink-2);
+  font-size: 0.7rem;
+  cursor: pointer;
+}
+
+.nf-chip.is-on {
+  background: var(--cta-bg);
+  color: var(--cta-fg);
+  border-color: transparent;
+}
+
+.nf-input-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nf-prefix-tag {
+  font-size: 0.74rem;
+  color: var(--ink-3);
+  padding-left: 4px;
+  flex-shrink: 0;
+}
+
+.nf-input {
+  flex: 1;
+  min-width: 0;
+  height: 31px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-recessed);
+  color: var(--ink-1);
+  font-size: 0.78rem;
+  outline: none;
+}
+
+.nf-input:focus {
+  background: var(--surface-pill);
+  border-color: var(--border-strong);
+}
+
 .pool-stat {
   font-size: 0.72rem;
   color: var(--ink-3);
@@ -1757,6 +2758,55 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   background: var(--surface-recessed);
   border: 1px solid var(--border-hairline);
   cursor: pointer;
+  transition: transform 0.18s var(--ease-spring), box-shadow 0.18s ease, border-color 0.18s ease;
+}
+
+.lens-tile.is-selected {
+  border-color: var(--cta-bg);
+  box-shadow: 0 0 0 2px var(--cta-bg);
+}
+
+.sel-badge {
+  position: absolute;
+  top: 9px;
+  left: 9px;
+  z-index: 4;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  border: 1.5px solid rgba(255, 255, 255, 0.85);
+  background: rgba(11, 13, 17, 0.45);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  cursor: pointer;
+}
+
+.sel-badge.is-checked {
+  background: var(--emerald-fg);
+  border-color: #fff;
+}
+
+.sel-check-inline {
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface-recessed);
+  color: var(--cta-fg);
+  display: grid;
+  place-items: center;
+  padding: 0;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.sel-check-inline.is-checked {
+  background: var(--cta-bg);
+  border-color: var(--cta-bg);
 }
 
 .lens-tile img {
@@ -1877,7 +2927,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   cursor: pointer;
 }
 
-/* Unified List Rows — Desktop Horizontal, Mobile Clean Two-Tier! */
+/* Unified List Rows */
 .file-list {
   display: flex;
   flex-direction: column;
@@ -1891,6 +2941,12 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.file-row.is-selected {
+  border-color: var(--cta-bg);
+  box-shadow: 0 0 0 1.5px var(--cta-bg);
 }
 
 .fr-main {
@@ -1989,7 +3045,93 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   border-color: var(--border-strong);
 }
 
-/* Mobile Responsive Fix: Never squish filenames into 1-char vertical noodles! */
+/* Floating Batch Action Dock */
+.batch-dock {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: max(22px, calc(env(safe-area-inset-bottom, 0px) + 16px));
+  z-index: 95;
+  border-radius: 16px;
+  padding: 9px 13px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  max-width: calc(100vw - 24px);
+}
+
+.bd-info {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.bd-cnt {
+  font-size: 0.82rem;
+  font-weight: 660;
+  color: var(--ink-1);
+}
+
+.bd-bytes {
+  font-size: 0.72rem;
+  color: var(--ink-3);
+}
+
+.bd-acts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.bd-danger-btn {
+  color: var(--danger-fg);
+  border-color: rgba(220, 38, 38, 0.28);
+  background: var(--danger-bg);
+}
+
+.bd-danger-solid {
+  background: var(--danger-solid);
+  color: #fff;
+  border-color: transparent;
+}
+
+.bd-close {
+  width: 29px;
+  height: 29px;
+}
+
+.dock-pop-enter-active,
+.dock-pop-leave-active {
+  transition: opacity 0.2s ease, transform 0.28s var(--ease-spring);
+}
+.dock-pop-enter-from,
+.dock-pop-leave-to {
+  opacity: 0;
+  transform: translate(-50%, 14px) scale(0.96);
+}
+
+@media (max-width: 860px) {
+  .batch-dock {
+    left: calc(12px + env(safe-area-inset-left, 0px));
+    right: calc(12px + env(safe-area-inset-right, 0px));
+    transform: none;
+    max-width: none;
+    bottom: calc(78px + env(safe-area-inset-bottom, 0px));
+  }
+  .batch-dock.is-above-player {
+    bottom: calc(132px + env(safe-area-inset-bottom, 0px));
+  }
+  .dock-pop-enter-from,
+  .dock-pop-leave-to {
+    opacity: 0;
+    transform: translateY(14px) scale(0.97);
+  }
+}
+
+/* Mobile Responsive Fix */
 @media (max-width: 720px) {
   .vault-top-acts {
     width: 100%;
@@ -1997,6 +3139,12 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   .vault-top-acts .tab-pill-group {
     min-width: 0;
     width: 100%;
+  }
+
+  .nf-input,
+  .rn-input {
+    font-size: 16px;
+    height: 36px;
   }
 
   .subtag-strip {
@@ -2052,7 +3200,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   }
 }
 
-/* Modals */
+/* Modals (with 4-side Dynamic Island & Home Indicator safe-area insets) */
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -2062,11 +3210,15 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   backdrop-filter: blur(16px);
   display: grid;
   place-items: center;
-  padding: 18px;
+  padding:
+    calc(18px + env(safe-area-inset-top, 0px))
+    calc(18px + env(safe-area-inset-right, 0px))
+    calc(18px + env(safe-area-inset-bottom, 0px))
+    calc(18px + env(safe-area-inset-left, 0px));
 }
 
 .rename-box {
-  width: min(380px, 100%);
+  width: min(392px, 100%);
   padding: 20px;
   border-radius: 22px;
   display: flex;

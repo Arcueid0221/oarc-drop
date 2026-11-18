@@ -221,7 +221,11 @@ async function clearPasscode() {
   backdrop-filter: blur(16px);
   display: grid;
   place-items: center;
-  padding: 18px;
+  padding:
+    calc(18px + env(safe-area-inset-top, 0px))
+    calc(18px + env(safe-area-inset-right, 0px))
+    calc(18px + env(safe-area-inset-bottom, 0px))
+    calc(18px + env(safe-area-inset-left, 0px));
 }
 
 .qr-sheet {
