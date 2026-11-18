@@ -4,7 +4,6 @@ import {
   copyImagePixels,
   copyText,
   formatBytes,
-  formatHtmlImage,
   formatMarkdownImage,
   formatTimeShort,
   shareFullUrl,
@@ -13,78 +12,27 @@ import {
 } from '../composables/useDropStore'
 import type { ClipItem } from '../types'
 import CopyPill from './CopyPill.vue'
+import DriveFolderSelect from './DriveFolderSelect.vue'
+import MorphDeleteBtn from './MorphDeleteBtn.vue'
 import UiIcon from './UiIcon.vue'
 
 const store = useDropStore()
-
-type HubMode = 'local' | 'silo' | 'gdrive'
-const mode = ref<HubMode>(
-  (localStorage.getItem('oarc_hub_mode') as HubMode) || 'local',
-)
-const siloPrefix = ref(localStorage.getItem('oarc_imghost_prefix') || 'images/')
-const autoCopyFmt = ref<'md' | 'url'>(
-  (localStorage.getItem('oarc_imghost_fmt') as 'md' | 'url') || 'md',
-)
 
 const draftText = ref('')
 const sendState = ref<'idle' | 'loading' | 'success'>('idle')
 const isDragOver = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
+const directDriveFolder = ref('')
 
-// Stream filters & preview states
-const streamFilter = ref<'all' | 'text' | 'image' | 'file'>('all')
-const searchQuery = ref('')
+// Per-file async busy states (keyed by clip.id)
+const promotingSilo = ref<Record<string, boolean>>({})
+const archivingDrive = ref<Record<string, boolean>>({})
+
+// Stream filter & inline preview states
+const streamFilter = ref<'all' | 'file' | 'image' | 'text'>('all')
 const expandedIds = ref<Record<string, boolean>>({})
 const inlinePreviewIds = ref<Record<string, boolean>>({})
 const lightboxClip = ref<ClipItem | null>(null)
-
-const modeOptions = computed(() => [
-  {
-    key: 'local' as const,
-    label: '私密互传',
-    hint: '仅你自己的电脑与手机可见，打开网页点「直下 / 复制」即取，外人不可见。',
-    enabled: true,
-  },
-  {
-    key: 'silo' as const,
-    label: '存图床拿外链',
-    hint: `公开存入 Silo (${siloPrefix.value})，上传完自动把 ${autoCopyFmt.value === 'md' ? 'Markdown 图片链接' : '公网 URL'} 复制进剪贴板。`,
-    enabled: Boolean(store.status.value?.siloEnabled),
-  },
-  {
-    key: 'gdrive' as const,
-    label: '存 Google Drive',
-    hint: '20 MB 自动切片直传你的网盘隔离目录 (gdrive:OArc-Drop)，不占服务器硬盘。',
-    enabled: Boolean(store.status.value?.gdriveEnabled),
-  },
-])
-
-const activeModeIdx = computed(() =>
-  Math.max(0, modeOptions.value.findIndex((o) => o.key === mode.value)),
-)
-
-const currentModeHint = computed(
-  () => modeOptions.value.find((o) => o.key === mode.value)?.hint || '',
-)
-
-function selectMode(m: HubMode, enabled: boolean) {
-  if (!enabled) {
-    showToast(m === 'gdrive' ? 'Google Drive 未启用' : 'Silo 未连接')
-    return
-  }
-  mode.value = m
-  localStorage.setItem('oarc_hub_mode', m)
-}
-
-function setPrefix(p: string) {
-  siloPrefix.value = p
-  localStorage.setItem('oarc_imghost_prefix', p)
-}
-
-function setAutoCopyFmt(f: 'md' | 'url') {
-  autoCopyFmt.value = f
-  localStorage.setItem('oarc_imghost_fmt', f)
-}
 
 async function submitText() {
   const txt = draftText.value
@@ -96,7 +44,7 @@ async function submitText() {
     sendState.value = 'success'
     window.setTimeout(() => {
       sendState.value = 'idle'
-    }, 1000)
+    }, 900)
   } catch {
     sendState.value = 'idle'
   }
@@ -110,24 +58,36 @@ function handleComposerKey(e: KeyboardEvent) {
 }
 
 function dispatchFiles(files: File[]) {
+  const presetDrive = directDriveFolder.value
   for (const f of files) {
-    if (f.size <= 20 * 1024 * 1024 && (mode.value === 'local' || mode.value === 'silo')) {
+    if (presetDrive) {
+      void store.uploadChunkedFile(f, {
+        target: 'gdrive',
+        siloPrefix: 'drop/',
+        gdriveFolder: presetDrive,
+        ttlHours: 0,
+        maxDownloads: 0,
+        passcode: '',
+        addToClip: true,
+        skipShare: true,
+      })
+      continue
+    }
+    if (f.size <= 20 * 1024 * 1024) {
       void store.sendQuickPasteFile(f, {
-        target: mode.value,
-        prefix: mode.value === 'silo' ? siloPrefix.value : '',
-        autoCopyFormat: mode.value === 'silo' ? autoCopyFmt.value : 'none',
+        target: 'local',
+        autoCopyFormat: 'none',
       })
       continue
     }
     void store.uploadChunkedFile(f, {
-      target: mode.value,
-      siloPrefix: mode.value === 'silo' ? siloPrefix.value : 'drop/',
+      target: 'local',
+      siloPrefix: 'drop/',
       ttlHours: 0,
       maxDownloads: 0,
       passcode: '',
       addToClip: true,
       skipShare: true,
-      autoCopyFormat: mode.value === 'silo' ? autoCopyFmt.value : 'none',
     })
   }
 }
@@ -155,7 +115,7 @@ function handleComposerPaste(e: ClipboardEvent) {
 
 async function pasteFromSystemClipboard() {
   if (!navigator.clipboard) {
-    showToast('浏览器不支持直接读取剪贴板，请在输入框粘贴')
+    showToast('当前环境不支持读取剪贴板，请直接按 ⌘V 粘贴')
     return
   }
   try {
@@ -166,7 +126,9 @@ async function pasteFromSystemClipboard() {
         if (imgType) {
           const blob = await item.getType(imgType)
           const ext = imgType.split('/')[1] || 'png'
-          const file = new File([blob], `image.${ext}`, { type: imgType })
+          const file = new File([blob], `paste-${Date.now().toString().slice(-5)}.${ext}`, {
+            type: imgType,
+          })
           dispatchFiles([file])
           return
         }
@@ -177,9 +139,29 @@ async function pasteFromSystemClipboard() {
       await store.sendTextClip(txt)
       return
     }
-    showToast('当前系统剪贴板为空')
+    showToast('剪贴板为空')
   } catch {
-    showToast('请允许剪贴板权限，或直接在输入框长按粘贴')
+    showToast('请允许剪贴板读取权限，或在粘贴框内长按粘贴')
+  }
+}
+
+async function onPromoteToSilo(item: ClipItem) {
+  if (promotingSilo.value[item.id]) return
+  promotingSilo.value[item.id] = true
+  try {
+    await store.promoteClipToSilo(item, 'md')
+  } finally {
+    promotingSilo.value[item.id] = false
+  }
+}
+
+async function onArchiveToDrive(item: ClipItem, folder: string) {
+  if (!folder || archivingDrive.value[item.id]) return
+  archivingDrive.value[item.id] = true
+  try {
+    await store.archiveClipToGDrive(item, folder)
+  } finally {
+    archivingDrive.value[item.id] = false
   }
 }
 
@@ -196,7 +178,7 @@ async function shareClip(item: ClipItem) {
   if (item.shareCode) {
     const url = shareFullUrl(item.shareCode)
     await copyText(url, '已复制公开分享短链')
-    store.openQrModal(item.fileName || '文本片段', url, '外部访客免登录扫码直取')
+    store.openQrModal(item.fileName || '文本片段', url, '免登录扫码取件')
     return
   }
   const res = await fetch(`/api/clips/${item.id}/share`, {
@@ -212,7 +194,7 @@ async function shareClip(item: ClipItem) {
     }
     const url = shareFullUrl(sh.code)
     await copyText(url, '公开短链已生成并复制')
-    store.openQrModal(item.fileName || '文本片段', url, '免登录公开短链（7 天有效，可在「外链管理」随时作废）')
+    store.openQrModal(item.fileName || '文本片段', url, '7 天有效 · 可在外链管理随时作废')
   }
 }
 
@@ -223,7 +205,7 @@ async function removeClip(item: ClipItem) {
 
 function isLongText(txt?: string) {
   if (!txt) return false
-  return txt.length > 360 || txt.split('\n').length > 8
+  return txt.length > 340 || txt.split('\n').length > 8
 }
 
 function canInlinePreview(item: ClipItem) {
@@ -242,26 +224,18 @@ function canInlinePreview(item: ClipItem) {
   )
 }
 
-function storageBadge(st?: string) {
-  if (st === 'silo') return 'Silo 图床'
-  if (st === 'gdrive') return 'Google Drive'
-  return '私密暂存'
-}
-
-const filteredClips = computed(() => {
-  const q = searchQuery.value.trim().toLowerCase()
-  return store.clips.value.filter((c) => {
-    if (streamFilter.value !== 'all' && c.kind !== streamFilter.value) return false
-    if (q) {
-      const hay = `${c.fileName || ''} ${c.text || ''} ${c.storageKey || ''}`.toLowerCase()
-      if (!hay.includes(q)) return false
-    }
-    return true
-  })
-})
+const filteredClips = computed(() =>
+  store.clips.value.filter((c) => {
+    if (streamFilter.value === 'all') return true
+    if (streamFilter.value === 'file') return c.kind === 'file'
+    return c.kind === streamFilter.value
+  }),
+)
 
 const activeUploads = computed(() =>
-  store.uploads.value.filter((u) => u.status === 'uploading' || u.status === 'assembling' || u.status === 'error'),
+  store.uploads.value.filter(
+    (u) => u.status === 'uploading' || u.status === 'assembling' || u.status === 'error',
+  ),
 )
 
 function onHubGlobalPaste(e: Event) {
@@ -287,124 +261,92 @@ onBeforeUnmount(() => {
     <header class="pane-header">
       <div class="pane-title-wrap">
         <h1 class="pane-title">收发台</h1>
-        <p class="pane-subtitle">电脑与手机互传文字、原图与大文件 · 按 ⌘V 或拖入即传</p>
+        <span class="pane-count">{{ store.clips.value.length }}</span>
+      </div>
+
+      <div class="pane-actions">
+        <div class="filter-strip">
+          <button
+            v-for="f in [
+              { k: 'all' as const, l: '全部' },
+              { k: 'file' as const, l: '文件' },
+              { k: 'image' as const, l: '图片' },
+              { k: 'text' as const, l: '文本' },
+            ]"
+            :key="f.k"
+            type="button"
+            class="flt-chip"
+            :class="{ 'is-on': streamFilter === f.k }"
+            @click="streamFilter = f.k"
+          >
+            {{ f.l }}
+          </button>
+        </div>
       </div>
     </header>
 
     <div class="pane-body--narrow hub-stack">
-      <!-- Single Self-Explanatory Send & Drop Card (Zero overlapping floating popovers!) -->
-      <section class="glass-box composer-pod" :class="{ 'is-drag': isDragOver }">
-        <!-- Step 1: Clear Destination Switch -->
-        <div class="dest-row">
-          <div class="tab-pill-group dest-pills" :style="{ gridTemplateColumns: 'repeat(3, 1fr)' }">
-            <div
-              class="tab-pill-indicator"
-              :style="{
-                width: 'calc((100% - 7px) / 3)',
-                transform: `translateX(${activeModeIdx * 100}%)`,
-              }"
-            />
-            <button
-              v-for="opt in modeOptions"
-              :key="opt.key"
-              type="button"
-              class="tab-pill-btn"
-              :class="{ 'is-active': mode === opt.key, 'is-disabled': !opt.enabled }"
-              @click="selectMode(opt.key, opt.enabled)"
-            >
-              {{ opt.label }}
-            </button>
-          </div>
-          <div class="dest-hint">{{ currentModeHint }}</div>
-        </div>
-
-        <!-- Inline Image-Host Sub-options (only shown in Silo mode, clean flat flex row!) -->
-        <div v-if="mode === 'silo'" class="imghost-inline">
-          <div class="ih-pair">
-            <span class="ih-lbl">目录：</span>
-            <button
-              v-for="p in ['images/', 'drop/']"
-              :key="p"
-              type="button"
-              class="chip-btn mono"
-              :class="{ 'is-on': siloPrefix === p }"
-              @click="setPrefix(p)"
-            >
-              {{ p }}
-            </button>
-          </div>
-          <div class="ih-pair">
-            <span class="ih-lbl">自动复制：</span>
-            <button
-              type="button"
-              class="chip-btn"
-              :class="{ 'is-on': autoCopyFmt === 'md' }"
-              @click="setAutoCopyFmt('md')"
-            >
-              Markdown
-            </button>
-            <button
-              type="button"
-              class="chip-btn"
-              :class="{ 'is-on': autoCopyFmt === 'url' }"
-              @click="setAutoCopyFmt('url')"
-            >
-              纯 URL
-            </button>
-          </div>
-        </div>
-
-        <!-- Step 2: Text / Paste / Drag Area -->
-        <div class="composer-main">
+      <!-- SINGLE FOCAL PASTE & FILE DROP PAD -->
+      <section class="glass-box paste-dock" :class="{ 'is-drag': isDragOver }">
+        <div class="paste-well">
           <textarea
             v-model="draftText"
             rows="3"
-            class="composer-textarea"
-            :placeholder="
-              mode === 'silo'
-                ? '在此按 ⌘V 粘贴截图，或把图片拖进来，自动上传图床并复制链接…'
-                : '输入文字/代码（⌘+Enter 发送），或按 ⌘V 贴原图、把任意大小文件直接拖进这里…'
-            "
+            class="paste-input"
+            placeholder="按 ⌘V 粘贴文件、原图或文字，或直接将文件拖入此处（默认私密互传）…"
             @keydown="handleComposerKey"
             @paste="handleComposerPaste"
           />
+
+          <div v-if="isDragOver" class="drag-overlay">
+            <UiIcon name="arrow-up" :size="22" />
+            <span>松手立即私密互传</span>
+          </div>
         </div>
 
-        <!-- Step 3: Clean Action Bar -->
-        <footer class="composer-bar">
-          <div class="cbar-left">
+        <footer class="paste-bar">
+          <div class="pb-left">
+            <button type="button" class="pill-btn pill-btn--solid" @click="fileInput?.click()">
+              <UiIcon name="plus" :size="14" />
+              <span>选择文件</span>
+            </button>
+            <input ref="fileInput" type="file" multiple hidden @change="onPickedFiles" />
+
             <button
               type="button"
               class="pill-btn"
-              title="一键把手机或电脑剪贴板里的文字/图片发上来"
+              title="一键读取手机或电脑系统剪贴板"
               @click="pasteFromSystemClipboard"
             >
-              <UiIcon name="clipboard" :size="14" />
+              <UiIcon name="clipboard" :size="13.5" />
               <span>粘贴剪贴板</span>
             </button>
 
-            <button type="button" class="pill-btn" @click="fileInput?.click()">
-              <UiIcon name="plus" :size="14" />
-              <span>选择文件 / 原图</span>
-            </button>
-            <input ref="fileInput" type="file" multiple hidden @change="onPickedFiles" />
+            <DriveFolderSelect
+              v-if="store.status.value?.gdriveEnabled"
+              mode="preset"
+              :preset-value="directDriveFolder"
+              @select="directDriveFolder = $event"
+            />
           </div>
 
-          <button
-            type="button"
-            class="pill-btn pill-btn--solid send-btn"
-            :class="`state-${sendState}`"
-            :disabled="!draftText.trim() && sendState === 'idle'"
-            @click="submitText"
-          >
-            <UiIcon v-if="sendState === 'success'" name="check" :size="14.5" />
-            <UiIcon v-else name="arrow-up" :size="14.5" />
-            <span>{{ sendState === 'success' ? '已发送' : '发送文字' }}</span>
-          </button>
+          <Transition name="pop-btn">
+            <button
+              v-if="draftText.trim() || sendState !== 'idle'"
+              type="button"
+              class="pill-btn pill-btn--solid send-text-btn"
+              :class="`state-${sendState}`"
+              @click="submitText"
+            >
+              <UiIcon v-if="sendState === 'success'" name="check" :size="14" />
+              <UiIcon v-else name="arrow-up" :size="14" />
+              <span>{{ sendState === 'success' ? '已发送' : '发送文字' }}</span>
+            </button>
+          </Transition>
         </footer>
       </section>
 
-      <!-- Live Chunked Upload Progress -->
+      <!-- Active Chunked Upload Progress -->
       <div v-if="activeUploads.length > 0" class="upload-queue">
         <div v-for="u in activeUploads" :key="u.localId" class="glass-box up-row">
           <div class="up-top">
@@ -413,17 +355,17 @@ onBeforeUnmount(() => {
               <template v-if="u.status === 'uploading'">
                 {{ formatBytes(u.uploadedBytes) }} / {{ formatBytes(u.size) }} · {{ formatBytes(u.speedBps) }}/s
               </template>
-              <template v-else-if="u.status === 'assembling'">正在服务端合并校验…</template>
+              <template v-else-if="u.status === 'assembling'">合并校验中…</template>
               <template v-else>{{ u.error }}</template>
             </span>
             <button
               v-if="u.status === 'uploading'"
               type="button"
-              class="mini-icon-act is-danger"
+              class="icon-circle-btn up-cancel"
               title="取消上传"
               @click="u.abortCtrl.abort()"
             >
-              <UiIcon name="close" :size="13" />
+              <UiIcon name="close" :size="12.5" />
             </button>
           </div>
           <div class="up-bar">
@@ -435,235 +377,245 @@ onBeforeUnmount(() => {
         </div>
       </div>
 
-      <!-- History Feed Header -->
-      <div class="stream-header">
-        <div class="filter-chips">
-          <button
-            v-for="f in [
-              { k: 'all' as const, l: '全部记录' },
-              { k: 'text' as const, l: '文本' },
-              { k: 'image' as const, l: '图片' },
-              { k: 'file' as const, l: '文件' },
-            ]"
-            :key="f.k"
-            type="button"
-            class="chip-btn"
-            :class="{ 'is-on': streamFilter === f.k }"
-            @click="streamFilter = f.k"
-          >
-            {{ f.l }}
-          </button>
-        </div>
-
-        <div class="search-pill mini-search">
-          <UiIcon name="search" :size="14" />
-          <input v-model="searchQuery" placeholder="搜索记录…" />
-        </div>
+      <!-- Empty State -->
+      <div v-if="filteredClips.length === 0" class="glass-box empty-state">
+        暂无互传内容 · 在上方按 ⌘V 或选择文件即可跨设备同步
       </div>
 
-      <div v-if="filteredClips.length === 0" class="glass-box empty-card">
-        暂无记录 · 在上方打字、粘贴截图或拖入文件，你的其他设备打开就能立刻取回
-      </div>
-
-      <!-- Unified Stream -->
-      <div v-else class="clip-stream">
+      <!-- FILE-CENTRIC PRIVATE STREAM -->
+      <TransitionGroup v-else name="stream-card" tag="div" class="clip-stream">
         <article
           v-for="item in filteredClips"
           :key="item.id"
           class="glass-box clip-card"
           :class="{ 'is-pinned': item.pinned }"
         >
-          <div class="clip-top">
-            <div class="clip-tags">
-              <span class="kind-dot" :class="`kind-${item.kind}`" />
-              <span class="kind-name">
-                {{ item.kind === 'text' ? '文本片段' : item.fileName || '未命名文件' }}
-              </span>
-              <span v-if="item.kind !== 'text'" class="storage-tag">
-                {{ storageBadge(item.storage) }}
-              </span>
-              <span v-if="item.pinned" class="pin-pill">置顶</span>
-              <span class="clip-meta-txt mono">
-                {{ formatBytes(item.size) }} · {{ formatTimeShort(item.createdAt) }}
-              </span>
-            </div>
+          <!-- TEXT ITEM -->
+          <template v-if="item.kind === 'text'">
+            <header class="cc-head">
+              <div class="cc-tags">
+                <span v-if="item.pinned" class="tag-pill is-pin">置顶</span>
+                <span class="tag-pill mono">TEXT</span>
+                <span class="cc-meta mono">
+                  {{ formatBytes(item.size) }} · {{ formatTimeShort(item.createdAt) }}
+                </span>
+              </div>
 
-            <div class="clip-toolbar">
-              <template v-if="item.kind === 'text'">
-                <CopyPill :text="item.text || ''" label="复制文本" copied-label="已复制" compact />
-                <button
-                  v-if="(item.text || '').length <= 240"
-                  type="button"
-                  class="mini-icon-act"
-                  title="手机扫码读取"
-                  @click="store.openQrModal('扫码读取文本', item.text || '')"
-                >
-                  <UiIcon name="qr" :size="14" />
-                </button>
-              </template>
-
-              <template v-else-if="item.kind === 'image'">
-                <template v-if="item.publicUrl">
-                  <CopyPill
-                    :text="formatMarkdownImage(item.fileName || 'image', item.publicUrl)"
-                    label="MD"
-                    copied-label="已复制"
-                    compact
-                  />
-                  <CopyPill :text="item.publicUrl" label="URL" copied-label="已复制" compact />
-                  <CopyPill
-                    :text="formatHtmlImage(item.fileName || 'image', item.publicUrl)"
-                    label="HTML"
-                    copied-label="已复制"
-                    compact
-                  />
-                </template>
+              <div class="cc-tools">
+                <CopyPill :text="item.text || ''" label="复制" copied-label="已复制" />
                 <button
                   type="button"
-                  class="mini-pill-act"
-                  title="把图片直接写进系统剪贴板，去微信/文档直接粘贴"
-                  @click="copyImagePixels(`/api/clips/${item.id}/raw`)"
+                  class="icon-circle-btn"
+                  title="生成公开分享码"
+                  @click="shareClip(item)"
                 >
-                  <UiIcon name="copy" :size="12.5" />
-                  <span>复制原图</span>
+                  <UiIcon name="qr" :size="13.5" />
                 </button>
-                <a class="mini-icon-act" :href="`/api/clips/${item.id}/raw?download=1`" title="下载文件">
-                  <UiIcon name="download" :size="14" />
-                </a>
-              </template>
-
-              <template v-else>
-                <CopyPill
-                  v-if="item.publicUrl"
-                  :text="item.publicUrl"
-                  label="直链"
-                  copied-label="已复制"
-                  compact
-                />
                 <button
-                  v-if="canInlinePreview(item)"
                   type="button"
-                  class="mini-pill-act"
-                  @click="inlinePreviewIds[item.id] = !inlinePreviewIds[item.id]"
+                  class="icon-circle-btn"
+                  :class="{ 'is-pinned-btn': item.pinned }"
+                  title="置顶"
+                  @click="togglePin(item)"
                 >
-                  <UiIcon name="eye" :size="12.5" />
-                  <span>{{ inlinePreviewIds[item.id] ? '收起' : '预览' }}</span>
+                  <UiIcon name="pin" :size="13.5" />
                 </button>
-                <a class="mini-pill-act mini-pill-act--solid" :href="`/api/clips/${item.id}/raw?download=1`">
-                  <UiIcon name="download" :size="12.5" />
-                  <span>直下</span>
-                </a>
-              </template>
+                <MorphDeleteBtn title="删除此条文本" @confirm="removeClip(item)" />
+              </div>
+            </header>
 
-              <button
-                type="button"
-                class="mini-pill-act"
-                :class="{ 'is-shared': Boolean(item.shareCode) }"
-                :title="item.shareCode ? '查看公开分享链接与二维码' : '生成发给别人的免登下载链接与二维码'"
-                @click="shareClip(item)"
-              >
-                <UiIcon :name="item.shareCode ? 'qr' : 'share'" :size="12.5" />
-                <span>{{ item.shareCode ? '已分享' : '外发分享' }}</span>
-              </button>
-
-              <button
-                type="button"
-                class="mini-icon-act"
-                :class="{ 'is-pinned-btn': item.pinned }"
-                title="置顶"
-                @click="togglePin(item)"
-              >
-                <UiIcon name="pin" :size="13.5" />
-              </button>
-              <button
-                type="button"
-                class="mini-icon-act is-danger"
-                title="删除"
-                @click="removeClip(item)"
-              >
-                <UiIcon name="trash" :size="13.5" />
-              </button>
-            </div>
-          </div>
-
-          <div v-if="item.kind === 'text'" class="clip-text-wrap">
             <pre
-              class="clip-pre mono"
+              class="cc-text mono"
               :class="{ 'is-collapsed': isLongText(item.text) && !expandedIds[item.id] }"
             >{{ item.text }}</pre>
             <button
               v-if="isLongText(item.text)"
               type="button"
-              class="expand-link"
+              class="expand-btn"
               @click="expandedIds[item.id] = !expandedIds[item.id]"
             >
-              {{ expandedIds[item.id] ? '收起长文本' : '展开全部内容' }}
+              {{ expandedIds[item.id] ? '收起' : '展开全文' }}
             </button>
-          </div>
+          </template>
 
-          <div v-else-if="item.kind === 'image'" class="clip-img-box" @click="lightboxClip = item">
-            <img :src="`/api/clips/${item.id}/raw`" :alt="item.fileName" loading="lazy" />
-          </div>
+          <!-- FILE / IMAGE ITEM (Core Private Transfer + Per-File Silo & Google Drive Controls) -->
+          <template v-else>
+            <div class="file-main-row">
+              <!-- Thumbnail / Icon -->
+              <div
+                v-if="item.kind === 'image'"
+                class="file-thumb-box"
+                title="点击查看原图"
+                @click="lightboxClip = item"
+              >
+                <img :src="`/api/clips/${item.id}/raw`" :alt="item.fileName" loading="lazy" />
+              </div>
+              <div v-else class="file-ext-box mono">
+                {{ (item.fileName?.split('.').pop() || 'FILE').slice(0, 4).toUpperCase() }}
+              </div>
 
-          <div v-else-if="inlinePreviewIds[item.id]" class="inline-preview-box">
-            <video
-              v-if="(item.mimeType || '').startsWith('video/') || (item.fileName || '').match(/\.(mp4|webm)$/i)"
-              controls
-              preload="metadata"
-              :src="`/api/clips/${item.id}/raw`"
-              class="preview-video"
-            />
-            <audio
-              v-else-if="(item.mimeType || '').startsWith('audio/') || (item.fileName || '').match(/\.(mp3|flac|wav)$/i)"
-              controls
-              :src="`/api/clips/${item.id}/raw`"
-              class="preview-audio"
-            />
-            <iframe
-              v-else
-              :src="`/api/clips/${item.id}/raw`"
-              class="preview-pdf"
-              title="PDF Preview"
-            />
-          </div>
+              <!-- File Metadata -->
+              <div class="file-info">
+                <div class="file-title-line">
+                  <span v-if="item.pinned" class="tag-pill is-pin">置顶</span>
+                  <span class="file-name">{{ item.fileName }}</span>
+                </div>
+                <div class="file-meta mono">
+                  <span>私密互传</span>
+                  <span>· {{ formatBytes(item.size) }}</span>
+                  <span>· {{ formatTimeShort(item.createdAt) }}</span>
+                </div>
+              </div>
+
+              <!-- Quick Download / Copy Image + Pin + Share + Morph Delete -->
+              <div class="file-quick-tools">
+                <button
+                  v-if="item.kind === 'image'"
+                  type="button"
+                  class="pill-btn"
+                  title="复制无损原图到剪贴板"
+                  @click="copyImagePixels(`/api/clips/${item.id}/raw`)"
+                >
+                  <UiIcon name="copy" :size="13.5" />
+                  <span class="hide-xs">复制原图</span>
+                </button>
+
+                <button
+                  v-if="canInlinePreview(item)"
+                  type="button"
+                  class="icon-circle-btn"
+                  :title="inlinePreviewIds[item.id] ? '关闭预览' : '内联预览'"
+                  @click="inlinePreviewIds[item.id] = !inlinePreviewIds[item.id]"
+                >
+                  <UiIcon name="eye" :size="14" />
+                </button>
+
+                <a
+                  class="pill-btn pill-btn--solid"
+                  :href="`/api/clips/${item.id}/raw?download=1`"
+                  :title="`下载 ${item.fileName}`"
+                >
+                  <UiIcon name="download" :size="13.5" />
+                  <span>下载</span>
+                </a>
+
+                <button
+                  type="button"
+                  class="icon-circle-btn"
+                  title="生成公开分享短链与二维码"
+                  @click="shareClip(item)"
+                >
+                  <UiIcon name="qr" :size="13.5" />
+                </button>
+
+                <button
+                  type="button"
+                  class="icon-circle-btn"
+                  :class="{ 'is-pinned-btn': item.pinned }"
+                  title="置顶"
+                  @click="togglePin(item)"
+                >
+                  <UiIcon name="pin" :size="13.5" />
+                </button>
+
+                <MorphDeleteBtn title="删除此文件" @confirm="removeClip(item)" />
+              </div>
+            </div>
+
+            <!-- Inline Audio / Video / PDF Preview -->
+            <div v-if="inlinePreviewIds[item.id]" class="inline-player-box">
+              <video
+                v-if="(item.mimeType || '').startsWith('video/') || (item.fileName || '').endsWith('.mp4')"
+                controls
+                preload="metadata"
+                :src="`/api/clips/${item.id}/raw`"
+                class="inline-video"
+              />
+              <audio
+                v-else-if="(item.mimeType || '').startsWith('audio/')"
+                controls
+                preload="metadata"
+                :src="`/api/clips/${item.id}/raw`"
+                class="inline-audio"
+              />
+              <iframe
+                v-else
+                :src="`/api/clips/${item.id}/raw`"
+                class="inline-pdf"
+                title="PDF Preview"
+              />
+            </div>
+
+            <!-- PER-FILE DESTINATION ROUTING BAR: Silo Image-Host Link & Google Drive Folder Select -->
+            <footer class="file-dest-bar">
+              <!-- Silo Image Host Switch / Copy Links -->
+              <div v-if="store.status.value?.siloEnabled" class="dest-silo-group">
+                <template v-if="item.publicUrl">
+                  <span class="silo-ready-badge">
+                    <UiIcon name="check" :size="12" />
+                    <span>已存图床</span>
+                  </span>
+                  <CopyPill
+                    v-if="item.kind === 'image'"
+                    :text="formatMarkdownImage(item.fileName || 'image', item.publicUrl)"
+                    label="复制 MD"
+                    copied-label="已复制"
+                  />
+                  <CopyPill :text="item.publicUrl" label="复制外链" copied-label="已复制" />
+                </template>
+                <button
+                  v-else
+                  type="button"
+                  class="pill-btn silo-promote-btn"
+                  :disabled="promotingSilo[item.id]"
+                  @click="onPromoteToSilo(item)"
+                >
+                  <UiIcon name="link" :size="13.5" />
+                  <span>{{ promotingSilo[item.id] ? '正在转存图床…' : '存图床拿外链' }}</span>
+                </button>
+              </div>
+
+              <!-- Per-File Google Drive Folder Dropdown -->
+              <DriveFolderSelect
+                v-if="store.status.value?.gdriveEnabled"
+                mode="file"
+                :saved-path="item.gdrivePath || (item.storage === 'gdrive' ? item.storageKey : '')"
+                :busy="Boolean(archivingDrive[item.id])"
+                @select="onArchiveToDrive(item, $event)"
+              />
+            </footer>
+          </template>
         </article>
-      </div>
+      </TransitionGroup>
     </div>
 
     <!-- Image Lightbox -->
     <Teleport to="body">
-      <Transition name="lens-modal">
+      <Transition name="lb-fade">
         <div v-if="lightboxClip" class="lb-backdrop" @click.self="lightboxClip = null">
-          <div class="liquid-chrome lb-dialog">
-            <button type="button" class="icon-circle-btn lb-close" @click="lightboxClip = null">
-              <UiIcon name="close" :size="16" />
-            </button>
-            <div class="lb-stage">
-              <img :src="`/api/clips/${lightboxClip.id}/raw`" :alt="lightboxClip.fileName" />
-            </div>
-            <footer class="lb-bar">
-              <span class="mono">{{ lightboxClip.fileName }} · {{ formatBytes(lightboxClip.size) }}</span>
+          <div class="liquid-chrome lb-panel">
+            <img :src="`/api/clips/${lightboxClip.id}/raw`" :alt="lightboxClip.fileName" />
+            <div class="lb-bar">
+              <span class="lb-name">{{ lightboxClip.fileName }}</span>
               <div class="lb-acts">
                 <button
                   type="button"
                   class="pill-btn"
                   @click="copyImagePixels(`/api/clips/${lightboxClip.id}/raw`)"
                 >
-                  <UiIcon name="copy" :size="14" />
-                  <span>复制原图</span>
+                  复制原图
                 </button>
-                <CopyPill
-                  v-if="lightboxClip.publicUrl"
-                  :text="formatMarkdownImage(lightboxClip.fileName || 'image', lightboxClip.publicUrl)"
-                  label="复制 Markdown"
-                  copied-label="已复制"
-                />
-                <a class="pill-btn pill-btn--solid" :href="`/api/clips/${lightboxClip.id}/raw?download=1`">
-                  <UiIcon name="download" :size="14" />
-                  <span>下载原文件</span>
+                <a
+                  class="pill-btn pill-btn--solid"
+                  :href="`/api/clips/${lightboxClip.id}/raw?download=1`"
+                >
+                  下载原图
                 </a>
+                <button type="button" class="icon-circle-btn" @click="lightboxClip = null">
+                  <UiIcon name="close" :size="14" />
+                </button>
               </div>
-            </footer>
+            </div>
           </div>
         </div>
       </Transition>
@@ -672,138 +624,120 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.hub-page {
-  min-height: 100%;
-}
-
 .hub-stack {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 
-.composer-pod {
-  border-radius: 24px;
-  padding: 16px 18px 14px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.composer-pod.is-drag {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-
-.dest-row {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.dest-pills {
-  width: 100%;
-  max-width: 390px;
-}
-
-.dest-hint {
-  font-size: 0.77rem;
-  color: var(--ink-2);
-  line-height: 1.45;
-}
-
-.imghost-inline {
-  padding: 9px 12px;
-  border-radius: 14px;
+.filter-strip {
+  display: inline-flex;
+  padding: 2.5px;
+  border-radius: 9px;
   background: var(--surface-recessed);
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 18px;
-}
-
-.ih-pair {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.ih-lbl {
-  font-size: 0.75rem;
-  color: var(--ink-3);
-  font-weight: 580;
-}
-
-.chip-btn {
-  height: 28px;
-  padding: 0 11px;
-  border-radius: 999px;
   border: 1px solid var(--border-hairline);
-  background: var(--surface-card);
+  gap: 2px;
+}
+
+.flt-chip {
+  border: 0;
+  background: transparent;
   color: var(--ink-2);
-  font-size: 0.75rem;
+  font-size: 0.76rem;
   font-weight: 560;
+  padding: 4px 10px;
+  border-radius: 6.5px;
   cursor: pointer;
   transition: all 0.16s ease;
 }
 
-.chip-btn.is-on {
-  background: var(--cta-bg);
-  color: var(--cta-fg);
-  border-color: transparent;
+.flt-chip.is-on {
+  background: var(--surface-pill);
+  color: var(--ink-1);
+  font-weight: 640;
+  box-shadow: var(--shadow-pill);
 }
 
-.composer-main {
-  padding: 10px 12px;
-  border-radius: 16px;
+/* Focal Paste & Drop Dock */
+.paste-dock {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  transition: border-color 0.2s ease, transform 0.2s var(--ease-spring);
+}
+
+.paste-dock.is-drag {
+  border-color: var(--ink-1);
+  transform: scale(1.006);
+}
+
+.paste-well {
+  position: relative;
+  border-radius: 12px;
   background: var(--surface-recessed);
-  border: 1px solid var(--border-hairline);
+  border: 1px dashed var(--border-strong);
+  transition: background-color 0.18s ease, border-color 0.18s ease;
 }
 
-.composer-textarea {
+.paste-well:focus-within {
+  background: var(--surface-pill);
+  border-style: solid;
+  border-color: var(--border-strong);
+}
+
+.paste-input {
   width: 100%;
-  border: none;
+  border: 0;
   background: transparent;
   color: var(--ink-1);
-  font-size: 0.9rem;
+  padding: 13px 15px;
+  font-size: 0.88rem;
   line-height: 1.55;
   resize: vertical;
-  min-height: 62px;
-  max-height: 220px;
+  min-height: 80px;
   outline: none;
   display: block;
 }
 
-.composer-textarea::placeholder {
+.paste-input::placeholder {
   color: var(--ink-3);
 }
 
-.composer-bar {
+.drag-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  background: var(--surface-popover);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 0.88rem;
+  font-weight: 640;
+  color: var(--ink-1);
+}
+
+.paste-bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-}
-
-.cbar-left {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
   gap: 8px;
 }
 
-.send-btn:disabled {
-  opacity: 0.35;
-  cursor: default;
+.pb-left {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
 }
 
-.send-btn.state-success {
+.send-text-btn.state-success {
   background: var(--emerald-fg);
-  color: #fff;
 }
 
+/* Upload Progress */
 .upload-queue {
   display: flex;
   flex-direction: column;
@@ -811,340 +745,376 @@ onBeforeUnmount(() => {
 }
 
 .up-row {
-  padding: 12px 15px;
-  border-radius: 16px;
+  padding: 11px 14px;
+  border-radius: 13px;
 }
 
 .up-top {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-size: 0.8rem;
+  gap: 10px;
+  margin-bottom: 7px;
 }
 
 .up-name {
+  font-size: 0.82rem;
   font-weight: 620;
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .up-stat {
-  font-size: 0.73rem;
+  font-size: 0.72rem;
   color: var(--ink-3);
-  margin-left: auto;
+}
+
+.up-cancel {
+  width: 25px;
+  height: 25px;
 }
 
 .up-bar {
-  margin-top: 7px;
-  height: 5px;
+  height: 4px;
   border-radius: 999px;
-  background: var(--surface-recessed);
+  background: var(--surface-recessed-hover);
   overflow: hidden;
 }
 
 .up-fill {
   height: 100%;
-  background: var(--accent);
-  border-radius: 999px;
-  transition: width 0.2s ease;
+  background: var(--cta-bg);
+  transition: width 0.2s linear;
 }
 
-.stream-header {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.filter-chips {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.mini-search {
-  height: 32px;
-}
-
-.empty-card {
-  padding: 44px 20px;
-  border-radius: 20px;
+.empty-state {
+  padding: 46px 20px;
   text-align: center;
   font-size: 0.84rem;
   color: var(--ink-3);
 }
 
+/* Stream Cards */
 .clip-stream {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .clip-card {
-  padding: 14px 16px;
-  border-radius: 20px;
+  padding: 13px 15px;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
 .clip-card.is-pinned {
-  border-color: var(--accent-border);
+  border-color: var(--border-strong);
 }
 
-.clip-top {
+.cc-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px 12px;
+  gap: 8px;
 }
 
-.clip-tags {
-  display: flex;
-  flex-wrap: wrap;
+.cc-tags {
+  display: inline-flex;
   align-items: center;
   gap: 7px;
-  min-width: 0;
 }
 
-.kind-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-.kind-dot.kind-image {
-  background: #10b981;
-}
-.kind-dot.kind-file {
-  background: #f59e0b;
-}
-
-.kind-name {
-  font-size: 0.87rem;
-  font-weight: 640;
-  word-break: break-all;
-}
-
-.storage-tag,
-.pin-pill {
-  font-size: 0.69rem;
-  padding: 2px 8px;
-  border-radius: 999px;
+.tag-pill {
+  font-size: 0.65rem;
+  font-weight: 630;
+  padding: 2px 6px;
+  border-radius: 5px;
   background: var(--surface-recessed);
   color: var(--ink-2);
 }
 
-.pin-pill {
-  background: var(--accent-soft);
-  color: var(--accent);
+.tag-pill.is-pin {
+  background: rgba(234, 88, 12, 0.12);
+  color: var(--led-orange);
 }
 
-.clip-meta-txt {
+.cc-meta {
   font-size: 0.72rem;
   color: var(--ink-3);
 }
 
-.clip-toolbar {
-  display: flex;
-  flex-wrap: wrap;
+.cc-tools {
+  display: inline-flex;
   align-items: center;
   gap: 6px;
 }
 
-.mini-pill-act {
-  height: 28px;
-  padding: 0 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border-hairline);
-  background: var(--surface-recessed);
-  color: var(--ink-1);
-  font-size: 0.74rem;
-  font-weight: 580;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  cursor: pointer;
-  text-decoration: none;
-  transition: all 0.16s ease;
+.is-pinned-btn {
+  color: var(--led-orange);
+  border-color: rgba(234, 88, 12, 0.3);
 }
 
-.mini-pill-act:hover {
-  background: var(--surface-hover);
-  border-color: var(--border-strong);
-}
-
-.mini-pill-act--solid {
-  background: var(--cta-bg);
-  color: var(--cta-fg);
-  border-color: transparent;
-}
-
-.mini-pill-act.is-shared {
-  background: var(--accent-soft);
-  color: var(--accent);
-  border-color: var(--accent-border);
-}
-
-.mini-icon-act {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  border: 1px solid var(--border-hairline);
-  background: var(--surface-recessed);
-  color: var(--ink-2);
-  display: inline-grid;
-  place-items: center;
-  cursor: pointer;
-  text-decoration: none;
-  transition: all 0.16s ease;
-}
-
-.mini-icon-act:hover {
-  color: var(--ink-1);
-  background: var(--surface-hover);
-}
-
-.mini-icon-act.is-pinned-btn {
-  color: var(--accent);
-  background: var(--accent-soft);
-}
-
-.mini-icon-act.is-danger:hover {
-  color: var(--danger-fg);
-}
-
-.clip-pre {
+.cc-text {
   margin: 0;
-  padding: 10px 12px;
-  border-radius: 13px;
+  padding: 11px 13px;
+  border-radius: 10px;
   background: var(--surface-recessed);
   font-size: 0.81rem;
-  line-height: 1.55;
+  line-height: 1.56;
   white-space: pre-wrap;
   word-break: break-word;
   overflow-x: auto;
 }
 
-.clip-pre.is-collapsed {
-  max-height: 156px;
+.cc-text.is-collapsed {
+  max-height: 168px;
   overflow: hidden;
-  mask-image: linear-gradient(to bottom, #000 68%, transparent 100%);
 }
 
-.expand-link {
-  margin-top: 4px;
-  border: none;
-  background: none;
-  color: var(--accent);
+.expand-btn {
+  align-self: flex-start;
+  border: 0;
+  background: transparent;
+  color: var(--ink-2);
   font-size: 0.75rem;
   font-weight: 600;
+  padding: 0;
   cursor: pointer;
-  padding: 2px 0;
 }
 
-.clip-img-box {
-  max-height: 280px;
-  border-radius: 14px;
+/* File / Image Card Layout */
+.file-main-row {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+}
+
+.file-thumb-box {
+  width: 58px;
+  height: 58px;
+  border-radius: 10px;
   overflow: hidden;
   background: var(--surface-recessed);
+  border: 1px solid var(--border-hairline);
+  flex-shrink: 0;
   cursor: zoom-in;
-  display: flex;
-  justify-content: flex-start;
 }
 
-.clip-img-box img {
-  max-height: 280px;
-  max-width: 100%;
-  object-fit: contain;
+.file-thumb-box img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
   display: block;
 }
 
-.inline-preview-box {
-  border-radius: 14px;
-  overflow: hidden;
+.file-ext-box {
+  width: 52px;
+  height: 52px;
+  border-radius: 10px;
   background: var(--surface-recessed);
-  padding: 8px;
-}
-
-.preview-video {
-  width: 100%;
-  max-height: 360px;
-  border-radius: 10px;
-}
-
-.preview-audio {
-  width: 100%;
-}
-
-.preview-pdf {
-  width: 100%;
-  height: 420px;
-  border: none;
-  border-radius: 10px;
-}
-
-.lb-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 240;
-  background: rgba(15, 23, 42, 0.5);
-  backdrop-filter: blur(18px);
+  border: 1px solid var(--border-hairline);
   display: grid;
   place-items: center;
-  padding: 20px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--ink-2);
+  flex-shrink: 0;
 }
 
-.lb-dialog {
-  width: min(920px, 100%);
-  max-height: 90vh;
-  border-radius: 26px;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  position: relative;
-}
-
-.lb-close {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  z-index: 2;
-}
-
-.lb-stage {
+.file-info {
   flex: 1;
-  min-height: 0;
-  display: grid;
-  place-items: center;
+  min-width: 0;
+}
+
+.file-title-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.file-name {
+  font-size: 0.9rem;
+  font-weight: 640;
+  color: var(--ink-1);
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.lb-stage img {
-  max-width: 100%;
-  max-height: 72vh;
-  object-fit: contain;
-  border-radius: 14px;
+.file-meta {
+  margin-top: 3px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 0.72rem;
+  color: var(--ink-3);
 }
 
-.lb-bar {
+.file-quick-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.file-dest-bar {
+  padding-top: 9px;
+  border-top: 1px solid var(--border-hairline);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
+  gap: 8px;
+}
+
+.dest-silo-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.silo-promote-btn {
+  height: 31px;
+  padding: 0 10px;
+  font-size: 0.76rem;
+}
+
+.silo-ready-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 29px;
+  padding: 0 9px;
+  border-radius: 8px;
+  font-size: 0.74rem;
+  font-weight: 610;
+  background: var(--emerald-bg);
+  color: var(--emerald-fg);
+  border: 1px solid var(--emerald-border);
+}
+
+.inline-player-box {
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface-recessed);
+  padding: 6px;
+}
+
+.inline-video {
+  width: 100%;
+  max-height: 340px;
+  border-radius: 7px;
+  display: block;
+}
+
+.inline-audio {
+  width: 100%;
+}
+
+.inline-pdf {
+  width: 100%;
+  height: 380px;
+  border: 0;
+  border-radius: 7px;
+}
+
+@media (max-width: 680px) {
+  .file-main-row {
+    flex-wrap: wrap;
+  }
+  .file-quick-tools {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .hide-xs {
+    display: none;
+  }
+}
+
+/* Lightbox */
+.lb-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9980;
+  background: rgba(8, 9, 12, 0.68);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  display: grid;
+  place-items: center;
+  padding: 18px;
+}
+
+.lb-panel {
+  max-width: min(92vw, 980px);
+  max-height: 88dvh;
+  border-radius: 16px;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  font-size: 0.78rem;
-  color: var(--ink-2);
+}
+
+.lb-panel img {
+  max-width: 100%;
+  max-height: calc(88dvh - 70px);
+  object-fit: contain;
+  border-radius: 10px;
+}
+
+.lb-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 4px;
+}
+
+.lb-name {
+  font-size: 0.82rem;
+  font-weight: 620;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lb-acts {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
+  align-items: center;
+  gap: 7px;
+}
+
+.pop-btn-enter-active,
+.pop-btn-leave-active {
+  transition: transform 0.22s var(--ease-bounce), opacity 0.15s ease;
+}
+.pop-btn-enter-from,
+.pop-btn-leave-to {
+  opacity: 0;
+  transform: scale(0.88);
+}
+
+.stream-card-enter-active,
+.stream-card-leave-active {
+  transition: all 0.26s var(--ease-spring);
+}
+.stream-card-enter-from,
+.stream-card-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+.lb-fade-enter-active,
+.lb-fade-leave-active {
+  transition: opacity 0.2s ease;
+}
+.lb-fade-enter-from,
+.lb-fade-leave-to {
+  opacity: 0;
 }
 </style>

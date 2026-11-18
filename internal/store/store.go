@@ -31,7 +31,9 @@ type ClipItem struct {
 	SHA256     string    `json:"sha256,omitempty"`
 	Storage    string    `json:"storage,omitempty"`    // "local" | "silo" | "gdrive"
 	StorageKey string    `json:"storageKey,omitempty"` // S3 key or Drive rel path (omitted for local internal path)
-	PublicURL  string    `json:"publicUrl,omitempty"`  // Direct CDN URL when stored in Silo
+	PublicURL  string    `json:"publicUrl,omitempty"`  // Direct CDN URL when stored/promoted in Silo
+	SiloKey    string    `json:"siloKey,omitempty"`    // Silo object key when promoted to image host
+	GDrivePath string    `json:"gdrivePath,omitempty"` // Relative path under OArc-Drop/ when archived to Google Drive
 	LocalRel   string    `json:"-"`                    // relative to DataDir when Storage == "local"
 	ShareCode  string    `json:"shareCode,omitempty"`
 	Pinned     bool      `json:"pinned"`
@@ -65,6 +67,7 @@ type UploadSession struct {
 	PartsDone    map[int]int64 `json:"partsDone"`
 	Target       string    `json:"target"` // "local" | "silo" | "gdrive"
 	SiloPrefix   string    `json:"siloPrefix,omitempty"`
+	GDriveFolder string    `json:"gdriveFolder,omitempty"`
 	TTLHours     int       `json:"ttlHours"`
 	MaxDownloads int       `json:"maxDownloads"`
 	Passcode     string    `json:"-"` // transient until complete
@@ -353,6 +356,37 @@ func (s *Store) AttachShareToClip(id string, shareCode string) (*ClipItem, error
 		return nil, ErrNotFound
 	}
 	c.ShareCode = shareCode
+	if err := s.saveLocked(); err != nil {
+		return nil, err
+	}
+	cp := *c
+	return &cp, nil
+}
+
+func (s *Store) AttachSiloToClip(id string, siloKey string, publicURL string) (*ClipItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.clips[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	c.SiloKey = siloKey
+	c.PublicURL = publicURL
+	if err := s.saveLocked(); err != nil {
+		return nil, err
+	}
+	cp := *c
+	return &cp, nil
+}
+
+func (s *Store) AttachGDriveToClip(id string, gdrivePath string) (*ClipItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c, ok := s.clips[id]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	c.GDrivePath = gdrivePath
 	if err := s.saveLocked(); err != nil {
 		return nil, err
 	}

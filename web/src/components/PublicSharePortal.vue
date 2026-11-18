@@ -100,7 +100,7 @@ onMounted(() => {
   <main class="ticket-stage">
     <!-- Parallax Boarding-Pass / Ticket Stub -->
     <article
-      class="glass-panel specular-card parallax-ticket"
+      class="glass-box parallax-ticket"
       :class="{ 'is-shaking': shakeLock }"
       @mousemove="onTicketMove"
       @mouseleave="onTicketLeave"
@@ -108,8 +108,8 @@ onMounted(() => {
       <!-- Ticket Top Header -->
       <header class="ticket-top">
         <div class="t-brand">
-          <span class="t-dot" />
-          <span>O.Arc Drop</span>
+          <span class="t-serif">O.Arc</span>
+          <span class="t-code mono">DROP</span>
         </div>
         <span class="t-status mono" :class="{ 'is-locked': meta && !meta.unlocked }">
           {{ loading ? 'CHECKING' : errorMsg ? 'EXPIRED' : meta?.unlocked ? 'LOSSLESS READY' : 'PROTECTED' }}
@@ -244,17 +244,27 @@ onMounted(() => {
 
 .t-brand {
   display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 0.83rem;
-  font-weight: 650;
+  align-items: baseline;
+  gap: 6px;
 }
 
-.t-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: #10b981;
+.t-serif {
+  font-family: var(--font-serif);
+  font-style: italic;
+  font-size: 1.18rem;
+  color: var(--ink-1);
+}
+
+.t-code {
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  padding: 2px 5px;
+  border-radius: 5px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-recessed);
+  color: var(--ink-2);
+  transform: translateY(-1.5px);
 }
 
 .t-status {

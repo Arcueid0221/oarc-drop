@@ -137,6 +137,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/clips/{id}/raw", s.adminOnly(s.handleGetClipRaw))
 	s.mux.HandleFunc("PATCH /api/clips/{id}", s.adminOnly(s.handlePatchClip))
 	s.mux.HandleFunc("POST /api/clips/{id}/share", s.adminOnly(s.handleShareClip))
+	s.mux.HandleFunc("POST /api/clips/{id}/silo", s.adminOnly(s.handlePromoteClipToSilo))
+	s.mux.HandleFunc("POST /api/clips/{id}/gdrive", s.adminOnly(s.handleArchiveClipToGDrive))
 	s.mux.HandleFunc("DELETE /api/clips/{id}", s.adminOnly(s.handleDeleteClip))
 
 	// Chunked Uploads (20 MiB per request)
@@ -157,6 +159,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("POST /api/silo/rename", s.adminOnly(s.handleRenameSiloObject))
 	s.mux.HandleFunc("DELETE /api/silo/object", s.adminOnly(s.handleDeleteSiloObject))
 	s.mux.HandleFunc("GET /api/gdrive/files", s.adminOnly(s.handleListGDriveFiles))
+	s.mux.HandleFunc("GET /api/gdrive/folders", s.adminOnly(s.handleListGDriveFolders))
+	s.mux.HandleFunc("POST /api/gdrive/folders", s.adminOnly(s.handleCreateGDriveFolder))
 	s.mux.HandleFunc("GET /api/gdrive/stream", s.adminOnly(s.handleStreamGDriveFile))
 	s.mux.HandleFunc("DELETE /api/gdrive/file", s.adminOnly(s.handleDeleteGDriveFile))
 
@@ -408,6 +412,7 @@ func (s *Server) handleCreateFileClip(w http.ResponseWriter, r *http.Request) {
 			SHA256:     shaHex[:16],
 			Storage:    "silo",
 			StorageKey: objKey,
+			SiloKey:    objKey,
 			PublicURL:  pubURL,
 		})
 		if err != nil {
@@ -603,6 +608,7 @@ func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		MimeType     string `json:"mimeType"`
 		Target       string `json:"target"` // "local" | "silo" | "gdrive"
 		SiloPrefix   string `json:"siloPrefix"`
+		GDriveFolder string `json:"gdriveFolder"`
 		TTLHours     int    `json:"ttlHours"`
 		MaxDownloads int    `json:"maxDownloads"`
 		Passcode     string `json:"passcode"`
@@ -657,6 +663,7 @@ func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		TotalParts:   totalParts,
 		Target:       req.Target,
 		SiloPrefix:   sanitizeSiloPrefix(req.SiloPrefix, s.cfg.SiloDropPrefix),
+		GDriveFolder: normalizeDriveFolderOpt(req.GDriveFolder),
 		TTLHours:     req.TTLHours,
 		MaxDownloads: req.MaxDownloads,
 		Passcode:     req.Passcode,
@@ -791,7 +798,15 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request) {
 		s.broadcast("media.refresh", map[string]string{"key": objKey})
 
 	case "gdrive":
-		relKey := ym + "/" + u.FileName
+		var relKey string
+		switch u.GDriveFolder {
+		case "":
+			relKey = ym + "/" + u.FileName
+		case "/":
+			relKey = u.FileName
+		default:
+			relKey = u.GDriveFolder + "/" + u.FileName
+		}
 		dest := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + relKey
 		args := s.rcloneArgs("copyto", assembled, dest)
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
@@ -853,6 +868,11 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request) {
 			newClip.LocalRel = storageKey
 		} else {
 			newClip.StorageKey = storageKey
+			if u.Target == "silo" {
+				newClip.SiloKey = storageKey
+			} else if u.Target == "gdrive" {
+				newClip.GDrivePath = storageKey
+			}
 		}
 		clipItem, _ = s.store.AddStoredFileClip(newClip)
 		if clipItem != nil {

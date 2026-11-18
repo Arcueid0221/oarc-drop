@@ -27,6 +27,7 @@ const audioCount = ref(0)
 const siloObjects = ref<VaultObject[]>([])
 const siloFolders = ref<string[]>([])
 const gdriveFiles = ref<GDriveFile[]>([])
+const gdriveFolders = ref<string[]>(['/'])
 
 // Blog Music Catalog State
 const playlists = ref<CatalogPlaylist[]>([])
@@ -318,6 +319,93 @@ export function useDropStore() {
     gdriveFiles.value = d.items || []
   }
 
+  async function loadGDriveFolders() {
+    const res = await fetch('/api/gdrive/folders')
+    if (!res.ok) return
+    const d = await res.json()
+    if (Array.isArray(d.folders) && d.folders.length > 0) {
+      gdriveFolders.value = d.folders
+    }
+  }
+
+  async function createGDriveFolder(folderName: string): Promise<string | null> {
+    const clean = folderName.trim().replace(/^\/+|\/+$/g, '')
+    if (!clean) return null
+    const res = await fetch('/api/gdrive/folders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder: clean }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: '创建文件夹失败' }))
+      showToast(err.error || '创建文件夹失败')
+      return null
+    }
+    const d: { folder: string } = await res.json()
+    if (!gdriveFolders.value.includes(d.folder)) {
+      gdriveFolders.value = ['/', ...gdriveFolders.value.filter((f) => f !== '/'), d.folder].sort(
+        (a, b) => (a === '/' ? -1 : b === '/' ? 1 : a.localeCompare(b)),
+      )
+    }
+    showToast(`已创建 Drive 文件夹：${d.folder}`)
+    return d.folder
+  }
+
+  async function promoteClipToSilo(item: ClipItem, autoCopyFmt: 'md' | 'url' = 'md') {
+    if (item.publicUrl) {
+      const out =
+        autoCopyFmt === 'md'
+          ? formatMarkdownImage(item.fileName || 'image', item.publicUrl)
+          : item.publicUrl
+      await copyText(out, autoCopyFmt === 'md' ? '已复制 Markdown 外链' : '已复制图床直链')
+      return item
+    }
+    const res = await fetch(`/api/clips/${item.id}/silo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prefix: 'images/' }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: '转存图床失败' }))
+      showToast(err.error || '转存图床失败')
+      return null
+    }
+    const updated: ClipItem = await res.json()
+    clips.value = clips.value.map((c) => (c.id === updated.id ? updated : c))
+    if (updated.publicUrl) {
+      const isImg = updated.kind === 'image' || (updated.mimeType || '').startsWith('image/')
+      const out =
+        isImg && autoCopyFmt === 'md'
+          ? formatMarkdownImage(updated.fileName || 'image', updated.publicUrl)
+          : updated.publicUrl
+      await copyText(
+        out,
+        isImg && autoCopyFmt === 'md' ? '已存图床并复制 Markdown 外链' : '已存图床并复制公网直链',
+      )
+    }
+    void loadMedia(true)
+    return updated
+  }
+
+  async function archiveClipToGDrive(item: ClipItem, folder: string) {
+    const res = await fetch(`/api/clips/${item.id}/gdrive`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder }),
+    })
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ error: '存入 Google Drive 失败' }))
+      showToast(err.error || '存入 Google Drive 失败')
+      return null
+    }
+    const updated: ClipItem = await res.json()
+    clips.value = clips.value.map((c) => (c.id === updated.id ? updated : c))
+    const label = !folder || folder === '/' ? 'OArc-Drop/' : `OArc-Drop/${folder}/`
+    showToast(`已存入 Drive：${label}`)
+    if (gdriveFiles.value.length > 0) void loadGDriveFiles()
+    return updated
+  }
+
   async function loadMusicCatalog(refresh = false) {
     const res = await fetch(`/api/music/catalog${refresh ? '?refresh=1' : ''}`)
     if (!res.ok) return
@@ -431,6 +519,7 @@ export function useDropStore() {
     opts: {
       target: 'local' | 'silo' | 'gdrive'
       siloPrefix: string
+      gdriveFolder?: string
       ttlHours: number
       maxDownloads: number
       passcode: string
@@ -465,6 +554,7 @@ export function useDropStore() {
           mimeType: file.type || 'application/octet-stream',
           target: opts.target,
           siloPrefix: opts.siloPrefix,
+          gdriveFolder: opts.gdriveFolder || '',
           ttlHours: opts.ttlHours,
           maxDownloads: opts.maxDownloads,
           passcode: opts.passcode,
@@ -633,6 +723,7 @@ export function useDropStore() {
     siloObjects,
     siloFolders,
     gdriveFiles,
+    gdriveFolders,
     playlists,
     catalogTracks,
     uploads,
@@ -657,6 +748,10 @@ export function useDropStore() {
     loadMedia,
     loadSiloVault,
     loadGDriveFiles,
+    loadGDriveFolders,
+    createGDriveFolder,
+    promoteClipToSilo,
+    archiveClipToGDrive,
     loadMusicCatalog,
     connectSSE,
     sendTextClip,

@@ -8,8 +8,10 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -568,6 +570,7 @@ func (s *Server) handleMusicCatalog(w http.ResponseWriter, r *http.Request) {
 		Data []struct {
 			ID         int    `json:"id"`
 			Name       string `json:"name"`
+			Cover      string `json:"cover"`
 			CoverURL   string `json:"coverUrl"`
 			TrackCount int    `json:"trackCount"`
 		} `json:"data"`
@@ -617,10 +620,12 @@ func (s *Server) handleMusicCatalog(w http.ResponseWriter, r *http.Request) {
 		}
 		var detailWrap struct {
 			Data struct {
+				Cover  string `json:"cover"`
 				Tracks []struct {
 					Title      string `json:"title"`
 					Artist     string `json:"artist"`
 					Album      string `json:"album"`
+					Cover      string `json:"cover"`
 					CoverURL   string `json:"coverUrl"`
 					AudioURL   string `json:"audioUrl"`
 					DurationMs int64  `json:"durationMs"`
@@ -637,18 +642,29 @@ func (s *Server) handleMusicCatalog(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			keys = append(keys, k)
+			cURL := tr.CoverURL
+			if cURL == "" {
+				cURL = tr.Cover
+			}
 			cat.Tracks[k] = CatalogTrackInfo{
 				Title:      tr.Title,
 				Artist:     tr.Artist,
 				Album:      tr.Album,
-				CoverURL:   tr.CoverURL,
+				CoverURL:   cURL,
 				DurationMs: tr.DurationMs,
 			}
+		}
+		plCover := pl.CoverURL
+		if plCover == "" {
+			plCover = pl.Cover
+		}
+		if plCover == "" {
+			plCover = detailWrap.Data.Cover
 		}
 		cat.Playlists = append(cat.Playlists, CatalogPlaylist{
 			ID:         pl.ID,
 			Name:       pl.Name,
-			CoverURL:   pl.CoverURL,
+			CoverURL:   plCover,
 			TrackCount: len(keys),
 			TrackKeys:  keys,
 		})
@@ -660,4 +676,284 @@ func (s *Server) handleMusicCatalog(w http.ResponseWriter, r *http.Request) {
 	s.catalogMu.Unlock()
 
 	writeJSON(w, http.StatusOK, cat)
+}
+
+func isBlockedDriveName(p string) bool {
+	low := strings.ToLower(strings.Trim(p, "/"))
+	return strings.HasPrefix(low, "server-restic") || strings.Contains(low, "/server-restic")
+}
+
+// normalizeDriveFolderOpt normalizes an optional folder passed to upload init:
+// "" -> "" (auto default), "/" -> "/" (OArc-Drop root), "sub/dir" -> "sub/dir".
+func normalizeDriveFolderOpt(raw string) string {
+	raw = strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	if raw == "" {
+		return ""
+	}
+	if raw == "/" || raw == "." {
+		return "/"
+	}
+	sub, ok := cleanDriveSubfolder(raw)
+	if !ok {
+		return "/"
+	}
+	return sub
+}
+
+func cleanDriveSubfolder(raw string) (string, bool) {
+	p := strings.TrimSpace(strings.ReplaceAll(raw, "\\", "/"))
+	p = strings.Trim(p, "/")
+	if p == "" || strings.Contains(p, "..") {
+		return "", false
+	}
+	cleaned := path.Clean(p)
+	if cleaned == "." || cleaned == "/" || strings.HasPrefix(cleaned, "..") || isBlockedDriveName(cleaned) {
+		return "", false
+	}
+	return cleaned, true
+}
+
+// GET /api/gdrive/folders — lists subfolders under OArc-Drop/ (always includes "/" first).
+func (s *Server) handleListGDriveFolders(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.GDriveRemoteDir == "" {
+		writeJSON(w, http.StatusOK, map[string]any{"folders": []string{}, "enabled": false})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	defer cancel()
+	target := strings.TrimRight(s.cfg.GDriveRemoteDir, "/")
+	args := s.rcloneArgs("lsjson", target, "--recursive", "--dirs-only")
+	cmd := exec.CommandContext(ctx, s.cfg.RcloneBin, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "directory not found") || strings.Contains(string(out), "not found") {
+			writeJSON(w, http.StatusOK, map[string]any{"folders": []string{"/"}, "enabled": true})
+			return
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "读取 Google Drive 目录失败"})
+		return
+	}
+	var rawDirs []struct {
+		Path string `json:"Path"`
+	}
+	if err := json.Unmarshal(out, &rawDirs); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"folders": []string{"/"}, "enabled": true})
+		return
+	}
+	seen := map[string]bool{"/": true}
+	subs := make([]string, 0, len(rawDirs))
+	for _, d := range rawDirs {
+		clean, ok := cleanDriveSubfolder(d.Path)
+		if !ok || seen[clean] {
+			continue
+		}
+		seen[clean] = true
+		subs = append(subs, clean)
+	}
+	sort.Strings(subs)
+	folders := append([]string{"/"}, subs...)
+	writeJSON(w, http.StatusOK, map[string]any{"folders": folders, "enabled": true})
+}
+
+// POST /api/gdrive/folders — creates a new subfolder inside OArc-Drop/
+func (s *Server) handleCreateGDriveFolder(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.GDriveRemoteDir == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Google Drive 未启用"})
+		return
+	}
+	var req struct {
+		Folder string `json:"folder"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	sub, ok := cleanDriveSubfolder(req.Folder)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的文件夹名称"})
+		return
+	}
+	remoteDir := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + sub
+	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, s.cfg.RcloneBin, s.rcloneArgs("mkdir", remoteDir)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "创建文件夹失败: " + strings.TrimSpace(string(out))})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"ok": true, "folder": sub})
+}
+
+// materializeClipLocalPath resolves a local file path for a stored clip so server-side transfers
+// (e.g. local -> Silo or local -> Google Drive) require zero browser re-upload.
+func (s *Server) materializeClipLocalPath(ctx context.Context, c *store.ClipItem) (string, func(), error) {
+	noop := func() {}
+	if c.LocalRel != "" {
+		full := filepath.Join(s.cfg.DataDir, c.LocalRel)
+		if st, err := os.Stat(full); err == nil && !st.IsDir() {
+			return full, noop, nil
+		}
+	}
+	tmpPath := filepath.Join(s.cfg.DataDir, "staging", fmt.Sprintf("xfer_%s_%d", c.ID, time.Now().UTC().UnixNano()))
+	cleanup := func() { _ = os.Remove(tmpPath) }
+
+	switch c.Storage {
+	case "silo":
+		if s.cfg.S3 == nil || c.StorageKey == "" {
+			return "", noop, fmt.Errorf("Silo source unavailable")
+		}
+		resp, err := s.cfg.S3.GetObject(ctx, c.StorageKey, "", "")
+		if err != nil {
+			return "", noop, err
+		}
+		defer resp.Body.Close()
+		f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+		if err != nil {
+			return "", noop, err
+		}
+		_, copyErr := io.Copy(f, resp.Body)
+		_ = f.Close()
+		if copyErr != nil {
+			cleanup()
+			return "", noop, copyErr
+		}
+		return tmpPath, cleanup, nil
+
+	case "gdrive":
+		if s.cfg.GDriveRemoteDir == "" || c.StorageKey == "" {
+			return "", noop, fmt.Errorf("Google Drive source unavailable")
+		}
+		remotePath := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + strings.TrimLeft(c.StorageKey, "/")
+		cmd := exec.CommandContext(ctx, s.cfg.RcloneBin, s.rcloneArgs("copyto", remotePath, tmpPath)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			cleanup()
+			return "", noop, fmt.Errorf("rclone fetch failed: %s", strings.TrimSpace(string(out)))
+		}
+		return tmpPath, cleanup, nil
+	}
+	return "", noop, fmt.Errorf("clip source file not found")
+}
+
+// POST /api/clips/{id}/silo — promotes an existing Hub file clip to Silo image host and returns its public URL.
+func (s *Server) handlePromoteClipToSilo(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.S3 == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Silo 未连接"})
+		return
+	}
+	id := r.PathValue("id")
+	c, err := s.store.GetClip(id)
+	if err != nil || c.Kind == "text" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
+		return
+	}
+	if c.PublicURL != "" {
+		writeJSON(w, http.StatusOK, c)
+		return
+	}
+	var req struct {
+		Prefix string `json:"prefix"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req)
+	prefix := sanitizeSiloPrefix(req.Prefix, "images/")
+
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+
+	srcPath, cleanup, err := s.materializeClipLocalPath(ctx, c)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "读取源文件失败"})
+		return
+	}
+	defer cleanup()
+
+	f, err := os.Open(srcPath)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "打开源文件失败"})
+		return
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "读取文件大小失败"})
+		return
+	}
+
+	mimeType := c.MimeType
+	if mimeType == "" {
+		mimeType = mime.TypeByExtension(strings.ToLower(filepath.Ext(c.FileName)))
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+	}
+
+	objKey := s.resolveCleanSiloKey(ctx, prefix, c.FileName)
+	if err := s.cfg.S3.PutObject(ctx, objKey, f, st.Size(), mimeType, "public, max-age=2592000, immutable"); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "上传图床失败: " + err.Error()})
+		return
+	}
+	pubURL := s.cfg.S3.PublicObjectURL(objKey)
+	updated, err := s.store.AttachSiloToClip(id, objKey, pubURL)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.invalidateMediaCache()
+	s.broadcast("media.refresh", map[string]string{"key": objKey})
+	s.broadcast("clip.updated", updated)
+	writeJSON(w, http.StatusOK, updated)
+}
+
+// POST /api/clips/{id}/gdrive — copies an existing Hub file clip into a chosen subfolder under OArc-Drop/.
+func (s *Server) handleArchiveClipToGDrive(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.GDriveRemoteDir == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Google Drive 未启用"})
+		return
+	}
+	id := r.PathValue("id")
+	c, err := s.store.GetClip(id)
+	if err != nil || c.Kind == "text" {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "文件不存在"})
+		return
+	}
+	var req struct {
+		Folder string `json:"folder"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req)
+	rawFolder := strings.TrimSpace(req.Folder)
+
+	var relKey string
+	if rawFolder == "" || rawFolder == "/" || rawFolder == "." {
+		relKey = c.FileName
+	} else {
+		sub, ok := cleanDriveSubfolder(rawFolder)
+		if !ok {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的 Google Drive 文件夹"})
+			return
+		}
+		relKey = sub + "/" + c.FileName
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Minute)
+	defer cancel()
+
+	srcPath, cleanup, err := s.materializeClipLocalPath(ctx, c)
+	if err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "读取源文件失败"})
+		return
+	}
+	defer cleanup()
+
+	dest := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + relKey
+	cmd := exec.CommandContext(ctx, s.cfg.RcloneBin, s.rcloneArgs("copyto", srcPath, dest)...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "存入 Google Drive 失败: " + strings.TrimSpace(string(out))})
+		return
+	}
+	updated, err := s.store.AttachGDriveToClip(id, relKey)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	s.broadcast("clip.updated", updated)
+	writeJSON(w, http.StatusOK, updated)
 }

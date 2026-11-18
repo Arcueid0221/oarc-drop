@@ -27,6 +27,8 @@ export interface ClipItem {
   storage?: 'local' | 'silo' | 'gdrive'
   storageKey?: string
   publicUrl?: string
+  siloKey?: string
+  gdrivePath?: string
   shareCode?: string
   pinned: boolean
   createdAt: string

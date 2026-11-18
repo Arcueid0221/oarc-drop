@@ -6,6 +6,7 @@ import {
   useDropStore,
 } from '../composables/useDropStore'
 import CopyPill from './CopyPill.vue'
+import MorphDeleteBtn from './MorphDeleteBtn.vue'
 import UiIcon from './UiIcon.vue'
 
 const store = useDropStore()
@@ -18,9 +19,9 @@ async function revokeShare(code: string) {
 }
 
 function storageLabel(st: string): string {
-  if (st === 'silo') return 'Silo'
-  if (st === 'gdrive') return 'Drive'
-  return 'Local'
+  if (st === 'silo') return 'SILO'
+  if (st === 'gdrive') return 'DRIVE'
+  return 'PRIVATE'
 }
 </script>
 
@@ -29,17 +30,13 @@ function storageLabel(st: string): string {
     <header class="pane-header">
       <div class="pane-title-wrap">
         <h1 class="pane-title">外链管理</h1>
-        <p class="pane-subtitle">集中管理你对外公开分享的 `/s/短码` · 支持扫码免登录取件与随时作废</p>
-      </div>
-
-      <div class="pane-actions">
-        <span class="pill-count mono">{{ store.shares.value.length }} 条有效</span>
+        <span class="pane-count">{{ store.shares.value.length }}</span>
       </div>
     </header>
 
     <div class="pane-body--narrow">
       <div v-if="store.shares.value.length === 0" class="glass-box sh-empty">
-        暂无活跃的公开分享链接
+        当前无活跃的公开分享链接
       </div>
 
       <TransitionGroup v-else name="row-fade" tag="div" class="sh-list">
@@ -66,10 +63,10 @@ function storageLabel(st: string): string {
             <button
               type="button"
               class="icon-circle-btn"
-              title="查看取件二维码"
-              @click="store.openQrModal(sh.fileName, shareFullUrl(sh.code), '外部访客扫码免登录取件')"
+              title="查看二维码"
+              @click="store.openQrModal(sh.fileName, shareFullUrl(sh.code), '免登录扫码取件')"
             >
-              <UiIcon name="qr" :size="14.5" />
+              <UiIcon name="qr" :size="14" />
             </button>
             <a
               class="icon-circle-btn"
@@ -78,16 +75,13 @@ function storageLabel(st: string): string {
               rel="noopener"
               title="打开公开取件页"
             >
-              <UiIcon name="external" :size="14.5" />
+              <UiIcon name="external" :size="14" />
             </a>
-            <button
-              type="button"
-              class="icon-circle-btn danger-hover"
-              title="撤销分享"
-              @click="revokeShare(sh.code)"
-            >
-              <UiIcon name="trash" :size="14.5" />
-            </button>
+            <MorphDeleteBtn
+              title="作废外链"
+              confirm-label="确认作废"
+              @confirm="revokeShare(sh.code)"
+            />
           </div>
         </article>
       </TransitionGroup>
@@ -96,31 +90,21 @@ function storageLabel(st: string): string {
 </template>
 
 <style scoped>
-.pill-count {
-  padding: 4px 11px;
-  border-radius: 999px;
-  font-size: 0.76rem;
-  background: var(--surface-recessed);
-  color: var(--ink-2);
-  border: 1px solid var(--border-hairline);
-}
-
 .sh-empty {
-  padding: 56px 20px;
+  padding: 50px 20px;
   text-align: center;
-  font-size: 0.85rem;
+  font-size: 0.84rem;
   color: var(--ink-3);
 }
 
 .sh-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 9px;
 }
 
 .sh-card {
-  padding: 14px 18px;
-  border-radius: 20px;
+  padding: 13px 16px;
   display: flex;
   flex-wrap: wrap;
   justify-content: space-between;
@@ -136,10 +120,11 @@ function storageLabel(st: string): string {
 }
 
 .st-pill {
-  font-size: 0.69rem;
-  font-weight: 620;
-  padding: 2px 8px;
-  border-radius: 999px;
+  font-size: 0.64rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 5px;
   background: var(--surface-recessed);
   color: var(--ink-2);
 }
@@ -148,15 +133,15 @@ function storageLabel(st: string): string {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  font-size: 0.7rem;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: rgba(245, 158, 11, 0.13);
-  color: #d97706;
+  font-size: 0.68rem;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgba(234, 88, 12, 0.12);
+  color: var(--led-orange);
 }
 
 .sh-name {
-  font-size: 0.89rem;
+  font-size: 0.88rem;
   font-weight: 630;
   word-break: break-all;
 }
@@ -166,24 +151,19 @@ function storageLabel(st: string): string {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  font-size: 0.74rem;
+  font-size: 0.73rem;
   color: var(--ink-3);
 }
 
 .sh-actions {
   display: flex;
   align-items: center;
-  gap: 7px;
-}
-
-.danger-hover:hover {
-  color: var(--danger-fg);
-  border-color: rgba(225, 29, 72, 0.3);
+  gap: 6px;
 }
 
 .row-fade-enter-active,
 .row-fade-leave-active {
-  transition: all 0.28s var(--ease-spring);
+  transition: all 0.26s var(--ease-spring);
 }
 .row-fade-enter-from,
 .row-fade-leave-to {

@@ -13,6 +13,7 @@ import {
 } from '../composables/useDropStore'
 import type { GDriveFile, VaultObject } from '../types'
 import CopyPill from './CopyPill.vue'
+import MorphDeleteBtn from './MorphDeleteBtn.vue'
 import UiIcon from './UiIcon.vue'
 
 const store = useDropStore()
@@ -39,9 +40,9 @@ const renameTarget = ref<VaultObject | null>(null)
 const renameDraft = ref('')
 
 const pools = computed(() => [
-  { key: 'silo' as const, label: 'Silo 媒体/图床桶', enabled: Boolean(store.status.value?.siloEnabled) },
+  { key: 'silo' as const, label: 'Silo 存储桶', enabled: Boolean(store.status.value?.siloEnabled) },
   { key: 'gdrive' as const, label: 'Google Drive', enabled: Boolean(store.status.value?.gdriveEnabled) },
-  { key: 'local' as const, label: '本机暂存', enabled: true },
+  { key: 'local' as const, label: '私密互传', enabled: true },
 ])
 
 const activePoolIdx = computed(() => Math.max(0, pools.value.findIndex((p) => p.key === activePool.value)))
@@ -166,13 +167,7 @@ async function confirmRename() {
     renameTarget.value = null
     return
   }
-  let force = false
-  if (target.protected) {
-    force = window.confirm(
-      `「${target.key}」位于博客生产目录，改名可能导致已发布文章/歌单引用失效，确定仍要强制改名吗？`,
-    )
-    if (!force) return
-  }
+  const force = Boolean(target.protected)
   const res = await fetch('/api/silo/rename', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -188,16 +183,7 @@ async function confirmRename() {
   }
 }
 
-async function deleteSilo(item: VaultObject) {
-  let force = false
-  if (item.protected) {
-    force = window.confirm(
-      `「${item.key}」属于博客生产目录（非 images/ 或 drop/），删除会导致线上死链！确定强制永久删除吗？`,
-    )
-    if (!force) return
-  } else if (!window.confirm(`确定从 Silo 删除「${item.name}」吗？`)) {
-    return
-  }
+async function deleteSilo(item: VaultObject, force = false) {
   const res = await fetch(
     `/api/silo/object?key=${encodeURIComponent(item.key)}&force=${force ? '1' : '0'}`,
     { method: 'DELETE' },
@@ -212,7 +198,6 @@ async function deleteSilo(item: VaultObject) {
 }
 
 async function deleteDrive(item: GDriveFile) {
-  if (!window.confirm(`确定从 Google Drive 删除「${item.name}」吗？`)) return
   const res = await fetch(`/api/gdrive/file?path=${encodeURIComponent(item.path)}`, {
     method: 'DELETE',
   })
@@ -222,6 +207,14 @@ async function deleteDrive(item: GDriveFile) {
   } else {
     const err = await res.json().catch(() => ({ error: '删除失败' }))
     showToast(err.error || '删除失败')
+  }
+}
+
+async function deleteLocalClip(id: string, name?: string) {
+  const res = await fetch(`/api/clips/${id}`, { method: 'DELETE' })
+  if (res.ok) {
+    store.clips.value = store.clips.value.filter((c) => c.id !== id)
+    showToast(`已删除：${name || '文件'}`)
   }
 }
 
@@ -242,9 +235,15 @@ function openPreviewSilo(item: VaultObject) {
     <header class="pane-header">
       <div class="pane-title-wrap">
         <h1 class="pane-title">文件柜</h1>
-        <p class="pane-subtitle">
-          Silo 全格式图床与资源桶 · Google Drive 隔离目录 · 本机暂存一站式浏览与删改
-        </p>
+        <span class="pane-count">
+          {{
+            activePool === 'silo'
+              ? filteredSilo.length
+              : activePool === 'gdrive'
+                ? filteredDrive.length
+                : localFileClips.length
+          }}
+        </span>
       </div>
 
       <div class="pane-actions vault-top-acts">
@@ -252,7 +251,7 @@ function openPreviewSilo(item: VaultObject) {
           <div
             class="tab-pill-indicator"
             :style="{
-              width: 'calc((100% - 7px) / 3)',
+              width: 'calc((100% - 6px) / 3)',
               transform: `translateX(${activePoolIdx * 100}%)`,
             }"
           />
@@ -271,17 +270,16 @@ function openPreviewSilo(item: VaultObject) {
     </header>
 
     <div class="pane-body vault-body">
-      <!-- Toolbar: Search + Upload to Current Folder + View Toggle -->
       <div class="vault-toolbar">
         <div class="search-pill">
-          <UiIcon name="search" :size="14.5" />
-          <input v-model="search" placeholder="搜索文件名或目录…" />
+          <UiIcon name="search" :size="14" />
+          <input v-model="search" placeholder="搜索文件名或路径…" />
         </div>
 
         <div class="vt-right">
-          <button type="button" class="pill-btn pill-btn--accent" @click="uploadInput?.click()">
+          <button type="button" class="pill-btn pill-btn--solid" @click="uploadInput?.click()">
             <UiIcon name="plus" :size="14" />
-            <span>上传到此库</span>
+            <span>上传</span>
           </button>
           <input ref="uploadInput" type="file" multiple hidden @change="onPickedVaultUpload" />
 
@@ -398,20 +396,18 @@ function openPreviewSilo(item: VaultObject) {
                 >
                   <UiIcon name="edit" :size="12.5" />
                 </button>
-                <button
-                  type="button"
-                  class="scrim-circle danger"
-                  title="删除"
-                  @click="deleteSilo(obj)"
-                >
-                  <UiIcon name="trash" :size="12.5" />
-                </button>
+                <MorphDeleteBtn
+                  compact
+                  :protected-item="obj.protected"
+                  :protected-title="`删除 ${obj.name}`"
+                  @confirm="deleteSilo(obj, $event)"
+                />
               </div>
             </div>
           </article>
         </div>
 
-        <!-- List Mode (Crisp Finder-style rows for all 597+ files!) -->
+        <!-- List Mode -->
         <div v-else class="file-list">
           <div v-for="obj in filteredSilo" :key="obj.key" class="glass-box file-row">
             <div class="fr-main" @click="openPreviewSilo(obj)">
@@ -465,9 +461,12 @@ function openPreviewSilo(item: VaultObject) {
               <button type="button" class="mini-act" title="重命名" @click="startRename(obj)">
                 <UiIcon name="edit" :size="14" />
               </button>
-              <button type="button" class="mini-act is-danger" title="删除" @click="deleteSilo(obj)">
-                <UiIcon name="trash" :size="14" />
-              </button>
+              <MorphDeleteBtn
+                compact
+                :protected-item="obj.protected"
+                :protected-title="`删除 ${obj.name}`"
+                @confirm="deleteSilo(obj, $event)"
+              />
             </div>
           </div>
         </div>
@@ -476,7 +475,7 @@ function openPreviewSilo(item: VaultObject) {
       <!-- POOL 2: GOOGLE DRIVE -->
       <template v-else-if="activePool === 'gdrive'">
         <div v-if="filteredDrive.length === 0" class="glass-box empty-state">
-          `gdrive:OArc-Drop` 目录暂无文件 · 点右上角「上传到此库」即可通过 20 MB 切片直传 Google Drive
+          Google Drive 目录暂无文件
         </div>
         <div v-else class="file-list">
           <div v-for="gd in filteredDrive" :key="gd.path" class="glass-box file-row">
@@ -497,7 +496,7 @@ function openPreviewSilo(item: VaultObject) {
                 :href="`${gd.streamUrl}&size=${gd.size}&download=1`"
               >
                 <UiIcon name="download" :size="13.5" />
-                <span>下载回本机</span>
+                <span>下载</span>
               </a>
               <button
                 type="button"
@@ -507,9 +506,7 @@ function openPreviewSilo(item: VaultObject) {
               >
                 <UiIcon name="qr" :size="14" />
               </button>
-              <button type="button" class="mini-act is-danger" title="从 Drive 删除" @click="deleteDrive(gd)">
-                <UiIcon name="trash" :size="14" />
-              </button>
+              <MorphDeleteBtn compact title="从 Drive 删除" @confirm="deleteDrive(gd)" />
             </div>
           </div>
         </div>
@@ -518,7 +515,7 @@ function openPreviewSilo(item: VaultObject) {
       <!-- POOL 3: LOCAL PRIVATE FILES -->
       <template v-else>
         <div v-if="localFileClips.length === 0" class="glass-box empty-state">
-          本机暂存目录暂无文件
+          当前暂无私密互传文件
         </div>
         <div v-else class="file-list">
           <div v-for="lc in localFileClips" :key="lc.id" class="glass-box file-row">
@@ -529,28 +526,36 @@ function openPreviewSilo(item: VaultObject) {
               <div class="fr-text">
                 <div class="fr-name">{{ lc.fileName }}</div>
                 <div class="fr-sub mono">
-                  本机私密暂存 · {{ formatBytes(lc.size) }} · {{ formatTimeShort(lc.createdAt) }}
+                  私密互传 · {{ formatBytes(lc.size) }} · {{ formatTimeShort(lc.createdAt) }}
                 </div>
               </div>
             </div>
             <div class="fr-acts">
               <a class="pill-btn pill-btn--mini" :href="`/api/clips/${lc.id}/raw?download=1`">
                 <UiIcon name="download" :size="13.5" />
-                <span>直下</span>
+                <span>下载</span>
               </a>
+              <MorphDeleteBtn
+                compact
+                title="删除此文件"
+                @confirm="deleteLocalClip(lc.id, lc.fileName)"
+              />
             </div>
           </div>
         </div>
       </template>
     </div>
 
-    <!-- Rename Modal -->
+    <!-- Rename Modal (with inline protected folder notice — zero browser confirm!) -->
     <Teleport to="body">
       <Transition name="lens-modal">
         <div v-if="renameTarget" class="modal-backdrop" @click.self="renameTarget = null">
           <div class="liquid-chrome rename-box">
             <div class="rn-title">重命名对象</div>
             <div class="rn-sub mono">{{ renameTarget.folder }}</div>
+            <div v-if="renameTarget.protected" class="rn-warn">
+              该对象位于博客生产目录，改名可能导致线上文章或歌单旧地址失效。
+            </div>
             <input
               v-model="renameDraft"
               class="rn-input mono"
@@ -558,8 +563,8 @@ function openPreviewSilo(item: VaultObject) {
             />
             <div class="rn-btns">
               <button type="button" class="pill-btn" @click="renameTarget = null">取消</button>
-              <button type="button" class="pill-btn pill-btn--accent" @click="confirmRename">
-                确认改名
+              <button type="button" class="pill-btn pill-btn--solid" @click="confirmRename">
+                {{ renameTarget.protected ? '强制改名' : '确认改名' }}
               </button>
             </div>
           </div>
@@ -943,6 +948,15 @@ function openPreviewSilo(item: VaultObject) {
 .rn-sub {
   font-size: 0.73rem;
   color: var(--ink-3);
+}
+
+.rn-warn {
+  padding: 8px 10px;
+  border-radius: 9px;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  background: var(--danger-bg);
+  color: var(--danger-fg);
 }
 
 .rn-input {

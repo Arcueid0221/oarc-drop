@@ -233,8 +233,13 @@ if [ "$cmd" = "copyto" ]; then
 elif [ "$cmd" = "cat" ]; then
   src=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|%s/|')
   cat "$src"
+elif [ "$cmd" = "mkdir" ]; then
+  dst=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|%s/|')
+  mkdir -p "$dst"
+elif [ "$cmd" = "lsjson" ]; then
+  printf '[{"Path":"2026-11"},{"Path":"归档"}]'
 fi
-`, fakeGDriveRoot, fakeGDriveRoot)
+`, fakeGDriveRoot, fakeGDriveRoot, fakeGDriveRoot)
 	if err := os.WriteFile(fakeRclone, []byte(rcloneScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -410,5 +415,33 @@ fi
 	qrSvg, _ := io.ReadAll(qrResp.Body)
 	if qrResp.StatusCode != http.StatusOK || !bytes.Contains(qrSvg, []byte("<svg")) {
 		t.Fatalf("unexpected qr response: status=%d len=%d", qrResp.StatusCode, len(qrSvg))
+	}
+
+	// 10. Drive folders + per-file promotion of private clip (`clip`) to Silo image host & Google Drive folder
+	mkDirResp := doReq(http.MethodPost, "/api/gdrive/folders", strings.NewReader(`{"folder":"归档"}`), "application/json", true, nil)
+	if mkDirResp.StatusCode != http.StatusCreated {
+		t.Fatalf("expected 201 creating Drive folder, got %d", mkDirResp.StatusCode)
+	}
+	lsDirResp := doReq(http.MethodGet, "/api/gdrive/folders", nil, "", true, nil)
+	var lsDirs struct {
+		Folders []string `json:"folders"`
+	}
+	_ = json.NewDecoder(lsDirResp.Body).Decode(&lsDirs)
+	if len(lsDirs.Folders) < 2 || lsDirs.Folders[0] != "/" {
+		t.Fatalf("unexpected Drive folders response: %+v", lsDirs.Folders)
+	}
+
+	promResp := doReq(http.MethodPost, "/api/clips/"+clip.ID+"/silo", strings.NewReader(`{"prefix":"images/"}`), "application/json", true, nil)
+	var promClip store.ClipItem
+	_ = json.NewDecoder(promResp.Body).Decode(&promClip)
+	if promResp.StatusCode != http.StatusOK || promClip.PublicURL != "https://img.arcueidblog.top/aurora/images/screen.png" {
+		t.Fatalf("expected clip promoted to Silo images/screen.png, got status=%d clip=%+v", promResp.StatusCode, promClip)
+	}
+
+	gdResp := doReq(http.MethodPost, "/api/clips/"+clip.ID+"/gdrive", strings.NewReader(`{"folder":"归档"}`), "application/json", true, nil)
+	var gdClip store.ClipItem
+	_ = json.NewDecoder(gdResp.Body).Decode(&gdClip)
+	if gdResp.StatusCode != http.StatusOK || gdClip.GDrivePath != "归档/screen.png" {
+		t.Fatalf("expected clip archived to Google Drive 归档/screen.png, got status=%d clip=%+v", gdResp.StatusCode, gdClip)
 	}
 }
