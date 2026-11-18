@@ -39,7 +39,7 @@ const savedFolder = computed(() => {
 })
 
 const triggerLabel = computed(() => {
-  if (props.busy) return '转存中…'
+  if (props.busy) return '正在存入 Drive…'
   if (props.mode === 'preset') {
     if (!props.presetValue) return '直传 Drive：关'
     return props.presetValue === '/' ? '直传 Drive: /' : `直传 Drive: ${props.presetValue}`
@@ -148,9 +148,13 @@ onBeforeUnmount(() => {
     :disabled="busy"
     @click.stop="toggleOpen"
   >
-    <UiIcon :name="savedPath ? 'check' : 'cloud'" :size="13.5" />
+    <UiIcon
+      :name="busy ? 'spinner' : savedPath ? 'check' : 'cloud'"
+      :size="13.5"
+      :class="{ 'spin-anim': busy }"
+    />
     <span>{{ triggerLabel }}</span>
-    <UiIcon name="chevron-down" :size="12" class="chev" :class="{ 'is-up': isOpen }" />
+    <UiIcon v-if="!busy" name="chevron-down" :size="12" class="chev" :class="{ 'is-up': isOpen }" />
   </button>
 
   <Teleport to="body">
@@ -200,12 +204,13 @@ onBeforeUnmount(() => {
             :disabled="creating"
           />
           <button
-            v-if="newFolderDraft.trim()"
+            v-if="newFolderDraft.trim() || creating"
             type="submit"
             class="dp-add-btn"
             :disabled="creating"
           >
-            新建
+            <UiIcon v-if="creating" name="spinner" :size="12.5" class="spin-anim" />
+            <span>{{ creating ? '创建中' : '新建' }}</span>
           </button>
         </form>
       </div>
@@ -331,6 +336,9 @@ onBeforeUnmount(() => {
   font-weight: 620;
   cursor: pointer;
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .pop-drop-enter-active,

@@ -334,18 +334,66 @@ func (s *Store) ListLocalFiles() []ClipItem {
 }
 
 func (s *Store) SetClipPinned(id string, pinned bool) (*ClipItem, error) {
+	return s.UpdateClip(id, &pinned, nil)
+}
+
+func (s *Store) UpdateClip(id string, pinned *bool, newFileName *string) (*ClipItem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	c, ok := s.clips[id]
 	if !ok {
 		return nil, ErrNotFound
 	}
-	c.Pinned = pinned
+	if pinned != nil {
+		c.Pinned = *pinned
+	}
+	if newFileName != nil {
+		clean := sanitizeFileName(*newFileName)
+		if clean != "" && c.Kind != "text" {
+			oldExt := filepath.Ext(c.FileName)
+			if oldExt != "" && filepath.Ext(clean) == "" {
+				clean += oldExt
+			}
+			c.FileName = clean
+			if c.ShareCode != "" {
+				if sh, ok := s.shares[c.ShareCode]; ok && sh.Storage == "local" {
+					sh.FileName = clean
+				}
+			}
+		}
+	}
 	if err := s.saveLocked(); err != nil {
 		return nil, err
 	}
 	cp := *c
 	return &cp, nil
+}
+
+func (s *Store) ClearUnpinnedClips() ([]string, error) {
+	s.mu.Lock()
+	var deletedIDs []string
+	var localToDelete []string
+	for id, c := range s.clips {
+		if c.Pinned {
+			continue
+		}
+		deletedIDs = append(deletedIDs, id)
+		localRel := c.LocalRel
+		delete(s.clips, id)
+		if localRel != "" && !s.isLocalRelReferencedByShareLocked(localRel) && !s.isLocalRelReferencedByClipLocked(localRel) {
+			localToDelete = append(localToDelete, localRel)
+		}
+	}
+	var err error
+	if len(deletedIDs) > 0 {
+		err = s.saveLocked()
+	}
+	s.mu.Unlock()
+
+	for _, rel := range localToDelete {
+		_ = os.Remove(filepath.Join(s.dataDir, rel))
+	}
+	return deletedIDs, err
 }
 
 func (s *Store) AttachShareToClip(id string, shareCode string) (*ClipItem, error) {
@@ -547,22 +595,213 @@ func (s *Store) IncrementShareDownload(code string) error {
 	return s.saveLocked()
 }
 
-func (s *Store) DeleteShare(code string) (*ShareItem, bool, error) {
+func (s *Store) UpdateShareOptions(code string, ttlHours *int, maxDownloads *int, passcode *string) (*ShareItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sh, ok := s.shares[code]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	if ttlHours != nil {
+		if *ttlHours <= 0 {
+			sh.ExpiresAt = nil
+		} else {
+			t := time.Now().UTC().Add(time.Duration(*ttlHours) * time.Hour)
+			sh.ExpiresAt = &t
+		}
+	}
+	if maxDownloads != nil {
+		if *maxDownloads <= 0 {
+			sh.MaxDownloads = 0
+		} else {
+			sh.MaxDownloads = *maxDownloads
+			if sh.Downloads >= sh.MaxDownloads {
+				sh.Downloads = 0
+			}
+		}
+	}
+	if passcode != nil {
+		plain := strings.TrimSpace(*passcode)
+		if plain == "" {
+			sh.PassSalt = ""
+			sh.PassHash = ""
+			sh.HasPasscode = false
+		} else {
+			salt := randomID(8)
+			sh.PassSalt = salt
+			sh.PassHash = hashPasscode(salt, plain)
+			sh.HasPasscode = true
+		}
+	}
+	if err := s.saveLocked(); err != nil {
+		return nil, err
+	}
+	return sanitizeShare(sh), nil
+}
+
+func (s *Store) DeleteShare(code string) (*ShareItem, []*ClipItem, bool, error) {
 	s.mu.Lock()
 	sh, ok := s.shares[code]
 	if !ok {
 		s.mu.Unlock()
-		return nil, false, ErrNotFound
+		return nil, nil, false, ErrNotFound
 	}
 	cp := *sh
 	delete(s.shares, code)
+
+	var updatedClips []*ClipItem
+	for _, c := range s.clips {
+		if c.ShareCode == code {
+			c.ShareCode = ""
+			cc := *c
+			updatedClips = append(updatedClips, &cc)
+		}
+	}
+
 	canDeleteLocal := cp.Storage == "local" && !s.isLocalRelReferencedByClipLocked(cp.StorageKey) && !s.isLocalRelReferencedByShareLocked(cp.StorageKey)
 	err := s.saveLocked()
 	s.mu.Unlock()
 	if canDeleteLocal && cp.StorageKey != "" {
 		_ = os.Remove(filepath.Join(s.dataDir, cp.StorageKey))
 	}
-	return sanitizeShare(&cp), canDeleteLocal, err
+	return sanitizeShare(&cp), updatedClips, canDeleteLocal, err
+}
+
+func (s *Store) SyncSiloRename(oldKey, newKey, newPublicURL string) ([]*ClipItem, []*ShareItem) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	newBase := filepath.Base(strings.ReplaceAll(newKey, "\\", "/"))
+	var updatedClips []*ClipItem
+	var updatedShares []*ShareItem
+	dirty := false
+
+	for _, c := range s.clips {
+		changed := false
+		if c.Storage == "silo" && c.StorageKey == oldKey {
+			c.StorageKey = newKey
+			c.FileName = newBase
+			changed = true
+		}
+		if c.SiloKey == oldKey || (c.Storage == "silo" && c.StorageKey == newKey) {
+			c.SiloKey = newKey
+			c.PublicURL = newPublicURL
+			changed = true
+		}
+		if changed {
+			dirty = true
+			cc := *c
+			updatedClips = append(updatedClips, &cc)
+		}
+	}
+	for _, sh := range s.shares {
+		if sh.Storage == "silo" && sh.StorageKey == oldKey {
+			sh.StorageKey = newKey
+			sh.FileName = newBase
+			dirty = true
+			updatedShares = append(updatedShares, sanitizeShare(sh))
+		}
+	}
+	if dirty {
+		_ = s.saveLocked()
+	}
+	return updatedClips, updatedShares
+}
+
+func (s *Store) SyncSiloDelete(deletedKey string) ([]*ClipItem, []string, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var updatedClips []*ClipItem
+	var deletedClipIDs []string
+	var deletedShareCodes []string
+	dirty := false
+
+	for code, sh := range s.shares {
+		if sh.Storage == "silo" && sh.StorageKey == deletedKey {
+			delete(s.shares, code)
+			deletedShareCodes = append(deletedShareCodes, code)
+			dirty = true
+		}
+	}
+	deletedShareSet := make(map[string]struct{}, len(deletedShareCodes))
+	for _, code := range deletedShareCodes {
+		deletedShareSet[code] = struct{}{}
+	}
+
+	for id, c := range s.clips {
+		if c.Storage == "silo" && c.StorageKey == deletedKey {
+			delete(s.clips, id)
+			deletedClipIDs = append(deletedClipIDs, id)
+			dirty = true
+			continue
+		}
+		changed := false
+		if c.SiloKey == deletedKey {
+			c.SiloKey = ""
+			c.PublicURL = ""
+			changed = true
+		}
+		if _, gone := deletedShareSet[c.ShareCode]; gone && c.ShareCode != "" {
+			c.ShareCode = ""
+			changed = true
+		}
+		if changed {
+			dirty = true
+			cc := *c
+			updatedClips = append(updatedClips, &cc)
+		}
+	}
+	if dirty {
+		_ = s.saveLocked()
+	}
+	return updatedClips, deletedClipIDs, deletedShareCodes
+}
+
+func (s *Store) SyncGDriveDelete(deletedRelPath string) ([]*ClipItem, []string, []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var updatedClips []*ClipItem
+	var deletedClipIDs []string
+	var deletedShareCodes []string
+	dirty := false
+
+	for code, sh := range s.shares {
+		if sh.Storage == "gdrive" && sh.StorageKey == deletedRelPath {
+			delete(s.shares, code)
+			deletedShareCodes = append(deletedShareCodes, code)
+			dirty = true
+		}
+	}
+	deletedShareSet := make(map[string]struct{}, len(deletedShareCodes))
+	for _, code := range deletedShareCodes {
+		deletedShareSet[code] = struct{}{}
+	}
+
+	for id, c := range s.clips {
+		if c.Storage == "gdrive" && c.StorageKey == deletedRelPath {
+			delete(s.clips, id)
+			deletedClipIDs = append(deletedClipIDs, id)
+			dirty = true
+			continue
+		}
+		changed := false
+		if c.GDrivePath == deletedRelPath {
+			c.GDrivePath = ""
+			changed = true
+		}
+		if _, gone := deletedShareSet[c.ShareCode]; gone && c.ShareCode != "" {
+			c.ShareCode = ""
+			changed = true
+		}
+		if changed {
+			dirty = true
+			cc := *c
+			updatedClips = append(updatedClips, &cc)
+		}
+	}
+	if dirty {
+		_ = s.saveLocked()
+	}
+	return updatedClips, deletedClipIDs, deletedShareCodes
 }
 
 // Upload sessions (in-memory + staging files on disk)
@@ -626,6 +865,11 @@ func (s *Store) SweepExpired() int {
 		if isShareExpired(sh, now) {
 			delete(s.shares, code)
 			removed++
+			for _, c := range s.clips {
+				if c.ShareCode == code {
+					c.ShareCode = ""
+				}
+			}
 			if sh.Storage == "local" && sh.StorageKey != "" &&
 				!s.isLocalRelReferencedByClipLocked(sh.StorageKey) &&
 				!s.isLocalRelReferencedByShareLocked(sh.StorageKey) {
@@ -633,11 +877,14 @@ func (s *Store) SweepExpired() int {
 			}
 		}
 	}
+	activeUploadIDs := make(map[string]struct{}, len(s.uploads))
 	var staleUploads []string
 	for id, u := range s.uploads {
-		if now.Sub(u.CreatedAt) > 12*time.Hour {
+		if now.Sub(u.CreatedAt) > 2*time.Hour {
 			delete(s.uploads, id)
 			staleUploads = append(staleUploads, id)
+		} else {
+			activeUploadIDs[id] = struct{}{}
 		}
 	}
 	if removed > 0 {
@@ -650,6 +897,20 @@ func (s *Store) SweepExpired() int {
 	}
 	for _, id := range staleUploads {
 		_ = os.RemoveAll(filepath.Join(s.dataDir, "staging", id))
+	}
+
+	// Also sweep orphaned staging directories/files left by container restarts or aborted concurrent chunks
+	stagingRoot := filepath.Join(s.dataDir, "staging")
+	if entries, err := os.ReadDir(stagingRoot); err == nil {
+		for _, ent := range entries {
+			name := ent.Name()
+			if _, active := activeUploadIDs[name]; active {
+				continue
+			}
+			if info, stErr := ent.Info(); stErr == nil && now.Sub(info.ModTime().UTC()) > 2*time.Hour {
+				_ = os.RemoveAll(filepath.Join(stagingRoot, name))
+			}
+		}
 	}
 	return removed
 }

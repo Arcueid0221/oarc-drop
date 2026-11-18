@@ -1,6 +1,6 @@
 services:
   oarc-drop:
-    image: oarc-drop:20261118
+    image: oarc-drop:20261119
     build: ..
     container_name: oarc-drop-1
     user: "1000:1000"

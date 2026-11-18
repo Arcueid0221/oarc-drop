@@ -46,6 +46,9 @@ func newFakeSiloTransport(t *testing.T, bucket string, initial map[string]memObj
 	for k, v := range initial {
 		objs[k] = v
 	}
+	mpParts := make(map[string]map[int][]byte)
+	mpTypes := make(map[string]string)
+
 	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 ") {
 			http.Error(w, "missing sigv4", http.StatusForbidden)
@@ -79,6 +82,56 @@ func newFakeSiloTransport(t *testing.T, bucket string, initial map[string]memObj
 			w.Header().Set("Content-Type", "application/xml")
 			_ = xml.NewEncoder(w).Encode(resp)
 			return
+		}
+
+		// S3 Multipart Upload endpoints
+		if r.Method == http.MethodPost && r.URL.Query().Has("uploads") {
+			uid := fmt.Sprintf("mp-%d", time.Now().UnixNano())
+			mu.Lock()
+			mpParts[uid] = make(map[int][]byte)
+			mpTypes[uid] = r.Header.Get("Content-Type")
+			mu.Unlock()
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, "<InitiateMultipartUploadResult><UploadId>%s</UploadId></InitiateMultipartUploadResult>", uid)
+			return
+		}
+		if uid := r.URL.Query().Get("uploadId"); uid != "" {
+			switch r.Method {
+			case http.MethodPut:
+				var pNum int
+				_, _ = fmt.Sscanf(r.URL.Query().Get("partNumber"), "%d", &pNum)
+				b, _ := io.ReadAll(r.Body)
+				mu.Lock()
+				if mpParts[uid] != nil {
+					mpParts[uid][pNum] = b
+				}
+				mu.Unlock()
+				w.Header().Set("ETag", fmt.Sprintf("\"etag-part-%d\"", pNum))
+				w.WriteHeader(http.StatusOK)
+				return
+			case http.MethodPost:
+				mu.Lock()
+				partsMap := mpParts[uid]
+				ct := mpTypes[uid]
+				var full bytes.Buffer
+				for i := 1; i <= len(partsMap); i++ {
+					full.Write(partsMap[i])
+				}
+				objs[key] = memObj{data: full.Bytes(), contentType: ct}
+				delete(mpParts, uid)
+				delete(mpTypes, uid)
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("<CompleteMultipartUploadResult><ETag>\"mp-done\"</ETag></CompleteMultipartUploadResult>"))
+				return
+			case http.MethodDelete:
+				mu.Lock()
+				delete(mpParts, uid)
+				delete(mpTypes, uid)
+				mu.Unlock()
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 		}
 
 		switch r.Method {
@@ -236,10 +289,21 @@ elif [ "$cmd" = "cat" ]; then
 elif [ "$cmd" = "mkdir" ]; then
   dst=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|%s/|')
   mkdir -p "$dst"
+elif [ "$cmd" = "deletefile" ]; then
+  dst=$(echo "$2" | sed 's|^gdrive:OArc-Drop/|%s/|')
+  rm -f "$dst"
+elif [ "$cmd" = "lsf" ]; then
+  # rclone lsf --files-only <remoteDir>
+  dir=$(echo "$3" | sed 's|^gdrive:OArc-Drop$|%s|; s|^gdrive:OArc-Drop/|%s/|')
+  if [ -d "$dir" ]; then
+    for f in "$dir"/*; do
+      [ -f "$f" ] && basename "$f"
+    done
+  fi
 elif [ "$cmd" = "lsjson" ]; then
   printf '[{"Path":"2026-11"},{"Path":"归档"}]'
 fi
-`, fakeGDriveRoot, fakeGDriveRoot, fakeGDriveRoot)
+`, fakeGDriveRoot, fakeGDriveRoot, fakeGDriveRoot, fakeGDriveRoot, fakeGDriveRoot, fakeGDriveRoot)
 	if err := os.WriteFile(fakeRclone, []byte(rcloneScript), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -443,5 +507,84 @@ fi
 	_ = json.NewDecoder(gdResp.Body).Decode(&gdClip)
 	if gdResp.StatusCode != http.StatusOK || gdClip.GDrivePath != "归档/screen.png" {
 		t.Fatalf("expected clip archived to Google Drive 归档/screen.png, got status=%d clip=%+v", gdResp.StatusCode, gdClip)
+	}
+
+	// 11. Duplicate archive to same Google Drive folder must auto-suffix (-2) instead of overwriting!
+	gdResp2 := doReq(http.MethodPost, "/api/clips/"+clip.ID+"/gdrive", strings.NewReader(`{"folder":"归档"}`), "application/json", true, nil)
+	var gdClip2 store.ClipItem
+	_ = json.NewDecoder(gdResp2.Body).Decode(&gdClip2)
+	if gdResp2.StatusCode != http.StatusOK || gdClip2.GDrivePath != "归档/screen-2.png" {
+		t.Fatalf("expected collision-safe Drive path 归档/screen-2.png, got status=%d clip=%+v", gdResp2.StatusCode, gdClip2)
+	}
+
+	// 12. Repeated generic `image.png` pastes get distinct timestamped filenames
+	pasteGeneric := func() store.ClipItem {
+		var b bytes.Buffer
+		w := multipart.NewWriter(&b)
+		part, _ := w.CreateFormFile("file", "image.png")
+		_, _ = part.Write(rawPNG)
+		w.Close()
+		r := doReq(http.MethodPost, "/api/clips/file", &b, w.FormDataContentType(), true, nil)
+		var it store.ClipItem
+		_ = json.NewDecoder(r.Body).Decode(&it)
+		return it
+	}
+	p1 := pasteGeneric()
+	p2 := pasteGeneric()
+	if !strings.HasPrefix(p1.FileName, "paste-") || p1.FileName == p2.FileName {
+		t.Fatalf("expected distinct timestamped paste filenames, got %q and %q", p1.FileName, p2.FileName)
+	}
+
+	// 13. Rename clip preserves extension + 1-shot burn-after-reading share does NOT burn on HEAD or ?preview=1
+	patchClipResp := doReq(http.MethodPatch, "/api/clips/"+p1.ID, strings.NewReader(`{"pinned":true,"fileName":"speedtest"}`), "application/json", true, nil)
+	var patchedClip store.ClipItem
+	_ = json.NewDecoder(patchClipResp.Body).Decode(&patchedClip)
+	if !patchedClip.Pinned || patchedClip.FileName != "speedtest.png" {
+		t.Fatalf("expected pinned speedtest.png, got %+v", patchedClip)
+	}
+
+	shCreateResp := doReq(http.MethodPost, "/api/clips/"+p1.ID+"/share", strings.NewReader(`{"ttlHours":24,"maxDownloads":5}`), "application/json", true, nil)
+	var createdSh store.ShareItem
+	_ = json.NewDecoder(shCreateResp.Body).Decode(&createdSh)
+	// Patch share to 1-time download + passcode
+	patchShResp := doReq(http.MethodPatch, "/api/shares/"+createdSh.Code, strings.NewReader(`{"maxDownloads":1,"passcode":"9999"}`), "application/json", true, nil)
+	if patchShResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 patching share, got %d", patchShResp.StatusCode)
+	}
+	v9 := doReq(http.MethodPost, "/s/"+createdSh.Code+"/verify", strings.NewReader(`{"passcode":"9999"}`), "application/json", false, nil)
+	ck9 := v9.Cookies()
+
+	// HEAD probe & inline ?preview=1 must NOT consume the single download quota
+	if hr := doReq(http.MethodHead, "/s/"+createdSh.Code+"/raw?download=1", nil, "", false, ck9); hr.StatusCode != http.StatusOK {
+		t.Fatalf("HEAD probe failed: %d", hr.StatusCode)
+	}
+	if pr := doReq(http.MethodGet, "/s/"+createdSh.Code+"/raw?preview=1", nil, "", false, ck9); pr.StatusCode != http.StatusOK {
+		t.Fatalf("inline preview failed: %d", pr.StatusCode)
+	}
+	// Real download #1 succeeds, download #2 returns 410 Gone
+	if d1 := doReq(http.MethodGet, "/s/"+createdSh.Code+"/raw?download=1", nil, "", false, ck9); d1.StatusCode != http.StatusOK {
+		t.Fatalf("real download #1 should succeed, got %d", d1.StatusCode)
+	}
+	if d2 := doReq(http.MethodGet, "/s/"+createdSh.Code+"/raw?download=1", nil, "", false, ck9); d2.StatusCode != http.StatusGone {
+		t.Fatalf("download #2 after maxDownloads=1 should return 410, got %d", d2.StatusCode)
+	}
+
+	// 14. Cross-tab sync: renaming Silo object updates ClipItem.PublicURL; clearing unpinned keeps pinned clip
+	renScreen := doReq(http.MethodPost, "/api/silo/rename", strings.NewReader(`{"key":"images/screen.png","newName":"hero-banner.png"}`), "application/json", true, nil)
+	if renScreen.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 renaming images/screen.png, got %d", renScreen.StatusCode)
+	}
+	updatedOriginClip, _ := st.GetClip(clip.ID)
+	if updatedOriginClip.PublicURL != "https://img.arcueidblog.top/aurora/images/hero-banner.png" {
+		t.Fatalf("expected clip PublicURL synced after Silo rename, got %s", updatedOriginClip.PublicURL)
+	}
+
+	clrResp := doReq(http.MethodPost, "/api/clips/clear-unpinned", nil, "", true, nil)
+	if clrResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 clearing unpinned clips, got %d", clrResp.StatusCode)
+	}
+	remaining := st.ListClips()
+	if len(remaining) != 1 || remaining[0].ID != p1.ID {
+		t.Fatalf("expected only 1 pinned clip remaining, got %d", len(remaining))
 	}
 }

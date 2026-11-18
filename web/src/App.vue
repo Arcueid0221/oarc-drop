@@ -129,8 +129,15 @@ async function onGlobalPaste(e: ClipboardEvent) {
   }
 }
 
+function onGlobalKeyDown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && store.qrModal.value) {
+    store.closeQrModal()
+  }
+}
+
 onMounted(() => {
   applyTheme(theme.value)
+  window.addEventListener('keydown', onGlobalKeyDown)
   if (!shareCode.value) {
     void store.loadInitial()
     void store.loadMedia(false)
@@ -143,6 +150,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   if (stopSSE) stopSSE()
+  window.removeEventListener('keydown', onGlobalKeyDown)
   window.removeEventListener('paste', onGlobalPaste)
 })
 </script>
@@ -168,7 +176,14 @@ onBeforeUnmount(() => {
 
   <PublicSharePortal v-if="shareCode" :code="shareCode" />
 
-  <div v-else class="desktop-frame" :class="{ 'is-music-locked': activeTab === 'music' }">
+  <div
+    v-else
+    class="desktop-frame"
+    :class="{
+      'is-music-locked': activeTab === 'music',
+      'has-mini-player': Boolean(store.currentTrack.value && activeTab !== 'music'),
+    }"
+  >
     <div class="macos-window">
       <!-- Precision Studio Sidebar -->
       <aside class="macos-sidebar">
@@ -271,10 +286,13 @@ onBeforeUnmount(() => {
             </div>
           </Transition>
 
-          <!-- Precision 20-Segment Storage Tick Ruler -->
+          <!-- Precision 20-Segment Storage Tick Ruler + Live Presence -->
           <div v-if="store.status.value?.diskTotal" class="sb-meter">
             <div class="meter-row mono">
-              <span>STORAGE</span>
+              <span class="presence-inline">
+                <i class="presence-dot" :class="{ 'is-multi': store.onlineClients.value > 1 }" />
+                <span>{{ store.onlineClients.value }} ONLINE</span>
+              </span>
               <span>FREE {{ formatBytes(store.status.value.diskFree) }}</span>
             </div>
             <div class="tick-ruler" aria-hidden="true">
@@ -311,7 +329,13 @@ onBeforeUnmount(() => {
             <circle cx="15" cy="15" r="9.2" class="emblem-ring-outer" />
             <circle cx="15" cy="15" r="5.6" class="emblem-ring-inner" />
             <path d="M15 7.4v7.6m0 0 2.9-2.9M15 15l-2.9-2.9" class="emblem-arrow" />
-            <circle cx="22.8" cy="7.2" r="1.8" class="emblem-led" />
+            <circle
+              cx="22.8"
+              cy="7.2"
+              r="1.8"
+              class="emblem-led"
+              :class="{ 'is-live': Boolean(activeUpload || store.isPlaying.value) }"
+            />
           </svg>
           <div class="brand-wordmark">
             <span class="brand-serif">O.Arc</span>
@@ -724,11 +748,33 @@ onBeforeUnmount(() => {
 .meter-row {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   font-size: 0.65rem;
   font-weight: 600;
   letter-spacing: 0.04em;
   color: var(--ink-3);
   margin-bottom: 5px;
+}
+
+.presence-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.presence-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink-3);
+  opacity: 0.55;
+  transition: all 0.2s ease;
+}
+
+.presence-dot.is-multi {
+  background: var(--emerald-fg);
+  opacity: 1;
+  box-shadow: 0 0 6px var(--emerald-fg);
 }
 
 .tick-ruler {
@@ -814,7 +860,11 @@ onBeforeUnmount(() => {
     border: 0;
     box-shadow: none;
     display: block;
-    padding-bottom: calc(92px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(98px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .desktop-frame.has-mini-player .macos-window {
+    padding-bottom: calc(152px + env(safe-area-inset-bottom, 0px));
   }
 
   .desktop-frame.is-music-locked .macos-window {
@@ -888,6 +938,30 @@ onBeforeUnmount(() => {
     flex-direction: column;
     gap: 8px;
     pointer-events: none;
+  }
+
+  .mobile-bottom-stack::before {
+    content: "";
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(88px + env(safe-area-inset-bottom, 0px));
+    background: linear-gradient(
+      to top,
+      var(--bg-outer) 46%,
+      rgba(232, 234, 239, 0) 100%
+    );
+    pointer-events: none;
+    z-index: -1;
+  }
+
+  [data-theme="dark"] .mobile-bottom-stack::before {
+    background: linear-gradient(
+      to top,
+      var(--bg-outer) 46%,
+      rgba(8, 9, 11, 0) 100%
+    );
   }
 
   .mobile-mini-player {

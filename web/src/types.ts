@@ -14,6 +14,7 @@ export interface ServerStatus {
   gdriveTarget: string
   userEmail: string
   headerLinks: HeaderLink[]
+  onlineClients?: number
 }
 
 export interface ClipItem {
@@ -141,4 +142,5 @@ export interface QrModalPayload {
   title: string
   url: string
   subtitle?: string
+  shareCode?: string
 }

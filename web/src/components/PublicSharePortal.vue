@@ -15,11 +15,14 @@ interface PublicMeta {
   size?: number
   sha256?: string
   storage?: string
+  downloads?: number
+  maxDownloads?: number
   createdAt: string
   expiresAt?: string
 }
 
 const loading = ref(true)
+const verifying = ref(false)
 const errorMsg = ref('')
 const meta = ref<PublicMeta | null>(null)
 const passcode = ref('')
@@ -39,7 +42,7 @@ async function fetchMeta() {
     }
     meta.value = data
     if (data.unlocked && data.mimeType?.startsWith('text/') && (data.size || 0) < 256 * 1024) {
-      const tr = await fetch(`/s/${props.code}/raw`)
+      const tr = await fetch(`/s/${props.code}/raw?preview=1`)
       if (tr.ok) previewText.value = await tr.text()
     }
   } catch {
@@ -50,22 +53,28 @@ async function fetchMeta() {
 }
 
 async function verifyCode() {
+  if (verifying.value) return
   unlockErr.value = ''
-  const res = await fetch(`/s/${props.code}/verify`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ passcode: passcode.value }),
-  })
-  if (!res.ok) {
-    const d = await res.json().catch(() => ({ error: '提取码不正确' }))
-    unlockErr.value = d.error || '提取码不正确'
-    shakeLock.value = true
-    window.setTimeout(() => {
-      shakeLock.value = false
-    }, 420)
-    return
+  verifying.value = true
+  try {
+    const res = await fetch(`/s/${props.code}/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passcode: passcode.value }),
+    })
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({ error: '提取码不正确' }))
+      unlockErr.value = d.error || '提取码不正确'
+      shakeLock.value = true
+      window.setTimeout(() => {
+        shakeLock.value = false
+      }, 420)
+      return
+    }
+    await fetchMeta()
+  } finally {
+    verifying.value = false
   }
-  await fetchMeta()
 }
 
 function onTicketMove(e: MouseEvent) {
@@ -135,8 +144,9 @@ onMounted(() => {
         />
         <p v-if="unlockErr" class="lock-err">{{ unlockErr }}</p>
 
-        <button type="submit" class="pill-btn pill-btn--solid full-cta">
-          解锁取件单
+        <button type="submit" class="pill-btn pill-btn--solid full-cta" :disabled="verifying">
+          <UiIcon v-if="verifying" name="spinner" :size="14" class="spin-anim" />
+          <span>{{ verifying ? '解锁中…' : '解锁取件单' }}</span>
         </button>
       </form>
 
@@ -151,8 +161,10 @@ onMounted(() => {
               <span class="kv-v">{{ formatBytes(meta.size) }}</span>
             </div>
             <div>
-              <span class="kv-k">CODE</span>
-              <span class="kv-v">{{ meta.code }}</span>
+              <span class="kv-k">{{ meta.maxDownloads ? 'QUOTA' : 'CODE' }}</span>
+              <span class="kv-v">
+                {{ meta.maxDownloads ? `${meta.downloads || 0}/${meta.maxDownloads}` : meta.code }}
+              </span>
             </div>
             <div>
               <span class="kv-k">EXPIRES</span>
@@ -161,15 +173,15 @@ onMounted(() => {
           </div>
 
           <div v-if="isImage" class="media-window">
-            <img :src="`/s/${code}/raw`" :alt="meta.fileName" />
+            <img :src="`/s/${code}/raw?preview=1`" :alt="meta.fileName" />
           </div>
 
           <div v-else-if="isAudio" class="audio-window">
-            <audio controls preload="metadata" :src="`/s/${code}/raw`" />
+            <audio controls preload="metadata" :src="`/s/${code}/raw?preview=1`" />
           </div>
 
           <div v-else-if="isVideo" class="media-window">
-            <video controls preload="metadata" :src="`/s/${code}/raw`" />
+            <video controls preload="metadata" :src="`/s/${code}/raw?preview=1`" />
           </div>
 
           <pre v-else-if="previewText" class="text-window mono">{{ previewText }}</pre>
@@ -303,7 +315,7 @@ onMounted(() => {
   margin: 0 auto 14px;
   border-radius: 50%;
   background: var(--surface-recessed);
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-hairline);
   display: grid;
   place-items: center;
   color: var(--ink-1);
@@ -326,7 +338,7 @@ onMounted(() => {
   width: 100%;
   height: 44px;
   border-radius: 14px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-hairline);
   background: var(--surface-recessed);
   color: var(--ink-1);
   text-align: center;
@@ -414,8 +426,8 @@ onMounted(() => {
   width: 18px;
   height: 18px;
   border-radius: 50%;
-  background: var(--bg-canvas);
-  border: 1px solid var(--border-subtle);
+  background: var(--bg-outer);
+  border: 1px solid var(--border-hairline);
   flex-shrink: 0;
 }
 

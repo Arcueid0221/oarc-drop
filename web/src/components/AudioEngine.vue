@@ -8,9 +8,11 @@ const audioEl = ref<HTMLAudioElement | null>(null)
 function getActiveList() {
   const all = store.audioTracks.value
   if (!store.activeQueueKeys.value.length) return all
-  const keySet = new Set(store.activeQueueKeys.value)
-  const filtered = all.filter((t) => keySet.has(t.key))
-  return filtered.length > 0 ? filtered : all
+  const byKey = new Map(all.map((t) => [t.key, t]))
+  const ordered = store.activeQueueKeys.value
+    .map((k) => byKey.get(k))
+    .filter((t): t is (typeof all)[number] => Boolean(t))
+  return ordered.length > 0 ? ordered : all
 }
 
 function stepTrack(delta: number, fromEnded = false) {
@@ -54,6 +56,10 @@ function onToggleEvent() {
   if (!el) return
   if (el.paused) void el.play()
   else el.pause()
+}
+
+function onPauseEvent() {
+  audioEl.value?.pause()
 }
 
 function onStepEvent(e: Event) {
@@ -104,6 +110,7 @@ onMounted(() => {
     audioEl.value.volume = store.audioVolume.value
   }
   window.addEventListener('oarc-audio-toggle', onToggleEvent)
+  window.addEventListener('oarc-audio-pause', onPauseEvent)
   window.addEventListener('oarc-audio-step', onStepEvent)
   window.addEventListener('oarc-audio-seek', onSeekEvent)
   window.addEventListener('oarc-audio-volume', onVolumeEvent)
@@ -118,6 +125,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('oarc-audio-toggle', onToggleEvent)
+  window.removeEventListener('oarc-audio-pause', onPauseEvent)
   window.removeEventListener('oarc-audio-step', onStepEvent)
   window.removeEventListener('oarc-audio-seek', onSeekEvent)
   window.removeEventListener('oarc-audio-volume', onVolumeEvent)

@@ -126,15 +126,7 @@ func (s *Server) handleQR(w http.ResponseWriter, r *http.Request) {
 // and appends -2, -3 only if an object with the exact same key already exists.
 func (s *Server) resolveCleanSiloKey(ctx context.Context, prefix string, fileName string) string {
 	cleanPrefix := sanitizeSiloPrefix(prefix, s.cfg.SiloDropPrefix)
-	safeName := store.SanitizeFileName(fileName)
-	lower := strings.ToLower(safeName)
-	if lower == "image.png" || lower == "image.jpg" || lower == "image.jpeg" || lower == "image.webp" || strings.HasPrefix(lower, "clipboard") {
-		ext := path.Ext(safeName)
-		if ext == "" {
-			ext = ".png"
-		}
-		safeName = "paste-" + time.Now().Format("20060102-150405") + ext
-	}
+	safeName := s.normalizeClipboardFileName(fileName)
 	cand := cleanPrefix + safeName
 	if s.cfg.S3 == nil {
 		return cand
@@ -292,12 +284,21 @@ func (s *Server) handleRenameSiloObject(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
+	newPublicURL := s.cfg.S3.PublicObjectURL(newKey)
+	s.evictTrackCache(oldKey)
 	s.invalidateMediaCache()
+	updatedClips, updatedShares := s.store.SyncSiloRename(oldKey, newKey, newPublicURL)
+	for _, c := range updatedClips {
+		s.broadcast("clip.updated", c)
+	}
+	for _, sh := range updatedShares {
+		s.broadcast("share.updated", sh)
+	}
 	s.broadcast("media.refresh", map[string]string{"key": newKey})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"key":       newKey,
 		"name":      cleanName,
-		"publicUrl": s.cfg.S3.PublicObjectURL(newKey),
+		"publicUrl": newPublicURL,
 	})
 }
 
@@ -323,7 +324,18 @@ func (s *Server) handleDeleteSiloObject(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
+	s.evictTrackCache(key)
 	s.invalidateMediaCache()
+	updatedClips, deletedClipIDs, deletedShareCodes := s.store.SyncSiloDelete(key)
+	for _, c := range updatedClips {
+		s.broadcast("clip.updated", c)
+	}
+	for _, cid := range deletedClipIDs {
+		s.broadcast("clip.deleted", map[string]string{"id": cid})
+	}
+	for _, code := range deletedShareCodes {
+		s.broadcast("share.deleted", map[string]string{"code": code})
+	}
 	s.broadcast("media.refresh", map[string]string{"deleted": key})
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -456,6 +468,16 @@ func (s *Server) handleDeleteGDriveFile(w http.ResponseWriter, r *http.Request) 
 	if out, err := cmd.CombinedOutput(); err != nil {
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": "删除 Drive 文件失败: " + strings.TrimSpace(string(out))})
 		return
+	}
+	updatedClips, deletedClipIDs, deletedShareCodes := s.store.SyncGDriveDelete(rel)
+	for _, c := range updatedClips {
+		s.broadcast("clip.updated", c)
+	}
+	for _, cid := range deletedClipIDs {
+		s.broadcast("clip.deleted", map[string]string{"id": cid})
+	}
+	for _, code := range deletedShareCodes {
+		s.broadcast("share.deleted", map[string]string{"code": code})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
@@ -903,6 +925,52 @@ func (s *Server) handlePromoteClipToSilo(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, updated)
 }
 
+// resolveCleanDriveRelKey inspects existing filenames in the target Google Drive directory
+// and appends -2, -3 on collision so repeated pastes or duplicate filenames never overwrite existing files.
+func (s *Server) resolveCleanDriveRelKey(ctx context.Context, dirRel string, fileName string) string {
+	safeName := s.normalizeClipboardFileName(fileName)
+	cleanDir := strings.Trim(dirRel, "/")
+	joinRel := func(n string) string {
+		if cleanDir == "" {
+			return n
+		}
+		return cleanDir + "/" + n
+	}
+	if s.cfg.GDriveRemoteDir == "" {
+		return joinRel(safeName)
+	}
+	remoteDir := strings.TrimRight(s.cfg.GDriveRemoteDir, "/")
+	if cleanDir != "" {
+		remoteDir += "/" + cleanDir
+	}
+	lsCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(lsCtx, s.cfg.RcloneBin, s.rcloneArgs("lsf", "--files-only", remoteDir)...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return joinRel(safeName)
+	}
+	existing := make(map[string]bool)
+	for _, line := range strings.Split(string(out), "\n") {
+		n := strings.TrimSpace(line)
+		if n != "" {
+			existing[n] = true
+		}
+	}
+	if !existing[safeName] {
+		return joinRel(safeName)
+	}
+	ext := path.Ext(safeName)
+	stem := strings.TrimSuffix(safeName, ext)
+	for i := 2; i <= 200; i++ {
+		cand := fmt.Sprintf("%s-%d%s", stem, i, ext)
+		if !existing[cand] {
+			return joinRel(cand)
+		}
+	}
+	return joinRel(fmt.Sprintf("%s-%d%s", stem, time.Now().Unix()%10000, ext))
+}
+
 // POST /api/clips/{id}/gdrive — copies an existing Hub file clip into a chosen subfolder under OArc-Drop/.
 func (s *Server) handleArchiveClipToGDrive(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.GDriveRemoteDir == "" {
@@ -921,16 +989,14 @@ func (s *Server) handleArchiveClipToGDrive(w http.ResponseWriter, r *http.Reques
 	_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req)
 	rawFolder := strings.TrimSpace(req.Folder)
 
-	var relKey string
-	if rawFolder == "" || rawFolder == "/" || rawFolder == "." {
-		relKey = c.FileName
-	} else {
+	var dirRel string
+	if rawFolder != "" && rawFolder != "/" && rawFolder != "." {
 		sub, ok := cleanDriveSubfolder(rawFolder)
 		if !ok {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "无效的 Google Drive 文件夹"})
 			return
 		}
-		relKey = sub + "/" + c.FileName
+		dirRel = sub
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Minute)
@@ -943,6 +1009,7 @@ func (s *Server) handleArchiveClipToGDrive(w http.ResponseWriter, r *http.Reques
 	}
 	defer cleanup()
 
+	relKey := s.resolveCleanDriveRelKey(ctx, dirRel, c.FileName)
 	dest := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + relKey
 	cmd := exec.CommandContext(ctx, s.cfg.RcloneBin, s.rcloneArgs("copyto", srcPath, dest)...)
 	if out, err := cmd.CombinedOutput(); err != nil {

@@ -92,6 +92,10 @@ type Server struct {
 	catalogMu      sync.RWMutex
 	catalogFetched time.Time
 	catalogCache   *MusicCatalog
+
+	pasteMu        sync.Mutex
+	lastPasteStamp string
+	lastPasteSeq   int
 }
 
 func New(cfg Config, st *store.Store) *Server {
@@ -134,6 +138,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/clips", s.adminOnly(s.handleListClips))
 	s.mux.HandleFunc("POST /api/clips/text", s.adminOnly(s.handleCreateTextClip))
 	s.mux.HandleFunc("POST /api/clips/file", s.adminOnly(s.handleCreateFileClip))
+	s.mux.HandleFunc("POST /api/clips/clear-unpinned", s.adminOnly(s.handleClearUnpinnedClips))
 	s.mux.HandleFunc("GET /api/clips/{id}/raw", s.adminOnly(s.handleGetClipRaw))
 	s.mux.HandleFunc("PATCH /api/clips/{id}", s.adminOnly(s.handlePatchClip))
 	s.mux.HandleFunc("POST /api/clips/{id}/share", s.adminOnly(s.handleShareClip))
@@ -151,6 +156,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/shares", s.adminOnly(s.handleListShares))
 	s.mux.HandleFunc("POST /api/shares/from-silo", s.adminOnly(s.handleCreateShareFromSilo))
 	s.mux.HandleFunc("POST /api/shares/create", s.adminOnly(s.handleCreateUniversalShare))
+	s.mux.HandleFunc("PATCH /api/shares/{code}", s.adminOnly(s.handleUpdateShare))
 	s.mux.HandleFunc("DELETE /api/shares/{code}", s.adminOnly(s.handleDeleteShare))
 	s.mux.HandleFunc("GET /api/qr", s.adminOnly(s.handleQR))
 
@@ -237,7 +243,14 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"gdriveTarget":  s.cfg.GDriveRemoteDir,
 		"userEmail":     userEmail,
 		"headerLinks":   s.cfg.HeaderLinks,
+		"onlineClients": s.onlineClientCount(),
 	})
+}
+
+func (s *Server) onlineClientCount() int {
+	s.sseMu.Lock()
+	defer s.sseMu.Unlock()
+	return len(s.sseClients)
 }
 
 func (s *Server) siloBucketName() string {
@@ -261,14 +274,18 @@ func (s *Server) handleSSE(w http.ResponseWriter, r *http.Request) {
 	ch := make(chan string, 16)
 	s.sseMu.Lock()
 	s.sseClients[ch] = struct{}{}
+	onlineNow := len(s.sseClients)
 	s.sseMu.Unlock()
+	s.broadcast("presence", map[string]int{"online": onlineNow})
 	defer func() {
 		s.sseMu.Lock()
 		delete(s.sseClients, ch)
+		leftNow := len(s.sseClients)
 		s.sseMu.Unlock()
+		s.broadcast("presence", map[string]int{"online": leftNow})
 	}()
 
-	fmt.Fprintf(w, "event: connected\ndata: {\"ts\":%d}\n\n", time.Now().Unix())
+	fmt.Fprintf(w, "event: connected\ndata: {\"ts\":%d,\"online\":%d}\n\n", time.Now().Unix(), onlineNow)
 	flusher.Flush()
 
 	ticker := time.NewTicker(25 * time.Second)
@@ -356,7 +373,7 @@ func (s *Server) handleCreateFileClip(w http.ResponseWriter, r *http.Request) {
 		prefix = strings.TrimSpace(r.FormValue("prefix"))
 	}
 
-	safeName := store.SanitizeFileName(hdr.Filename)
+	safeName := s.normalizeClipboardFileName(hdr.Filename)
 	mimeType := hdr.Header.Get("Content-Type")
 	if mimeType == "" || mimeType == "application/octet-stream" {
 		if guessed := mime.TypeByExtension(strings.ToLower(filepath.Ext(safeName))); guessed != "" {
@@ -503,22 +520,61 @@ func (s *Server) handleGetClipRaw(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) normalizeClipboardFileName(rawName string) string {
+	safeName := store.SanitizeFileName(rawName)
+	lower := strings.ToLower(safeName)
+	if lower == "image.png" || lower == "image.jpg" || lower == "image.jpeg" || lower == "image.webp" || lower == "blob" || strings.HasPrefix(lower, "clipboard") {
+		ext := path.Ext(safeName)
+		if ext == "" {
+			ext = ".png"
+		}
+		stamp := time.Now().Format("20060102-150405")
+		s.pasteMu.Lock()
+		if s.lastPasteStamp == stamp {
+			s.lastPasteSeq++
+		} else {
+			s.lastPasteStamp = stamp
+			s.lastPasteSeq = 1
+		}
+		seq := s.lastPasteSeq
+		s.pasteMu.Unlock()
+		if seq > 1 {
+			return fmt.Sprintf("paste-%s-%d%s", stamp, seq, ext)
+		}
+		return fmt.Sprintf("paste-%s%s", stamp, ext)
+	}
+	return safeName
+}
+
 func (s *Server) handlePatchClip(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var body struct {
-		Pinned bool `json:"pinned"`
+		Pinned   *bool   `json:"pinned"`
+		FileName *string `json:"fileName"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
 		return
 	}
-	item, err := s.store.SetClipPinned(id, body.Pinned)
+	item, err := s.store.UpdateClip(id, body.Pinned, body.FileName)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "clip not found"})
 		return
 	}
 	s.broadcast("clip.updated", item)
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) handleClearUnpinnedClips(w http.ResponseWriter, r *http.Request) {
+	deletedIDs, err := s.store.ClearUnpinnedClips()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	for _, id := range deletedIDs {
+		s.broadcast("clip.deleted", map[string]string{"id": id})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"removed": len(deletedIDs), "ids": deletedIDs})
 }
 
 func (s *Server) handleShareClip(w http.ResponseWriter, r *http.Request) {
@@ -641,7 +697,7 @@ func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	safeName := store.SanitizeFileName(req.FileName)
+	safeName := s.normalizeClipboardFileName(req.FileName)
 	mimeType := strings.TrimSpace(req.MimeType)
 	if mimeType == "" || mimeType == "application/octet-stream" {
 		if g := mime.TypeByExtension(strings.ToLower(filepath.Ext(safeName))); g != "" {
@@ -711,7 +767,12 @@ func (s *Server) handleUploadPart(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "write part failed"})
 		return
 	}
-	_ = s.store.MarkUploadPart(id, partNum, n)
+	if err := s.store.MarkUploadPart(id, partNum, n); err != nil {
+		// Session was aborted while this chunk was in flight — clean up immediately
+		_ = os.RemoveAll(filepath.Join(s.cfg.DataDir, "staging", id))
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "upload session aborted"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"part": partNum, "received": n})
 }
 
@@ -725,100 +786,167 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request) {
 	stagingDir := filepath.Join(s.cfg.DataDir, "staging", id)
 	defer os.RemoveAll(stagingDir)
 
-	assembled := filepath.Join(stagingDir, "assembled.bin")
-	out, err := os.OpenFile(assembled, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "assemble open failed"})
-		return
-	}
 	hasher := sha256.New()
 	var totalWritten int64
-	for p := 1; p <= u.TotalParts; p++ {
-		partPath := filepath.Join(stagingDir, fmt.Sprintf("part.%06d", p))
-		pf, err := os.Open(partPath)
-		if err != nil {
-			out.Close()
-			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("missing part %d", p)})
-			return
-		}
-		n, copyErr := io.Copy(io.MultiWriter(out, hasher), pf)
-		pf.Close()
-		_ = os.Remove(partPath) // free disk immediately as we stitch!
-		if copyErr != nil {
-			out.Close()
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "stitch failed"})
-			return
-		}
-		totalWritten += n
-	}
-	if err := out.Close(); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "close assembled failed"})
-		return
-	}
-	if u.Size > 0 && totalWritten != u.Size {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("size mismatch: got %d expected %d", totalWritten, u.Size)})
-		return
-	}
-	shaFull := hex.EncodeToString(hasher.Sum(nil))
+	var shaFull string
 	ym := time.Now().UTC().Format("2006-01")
 
 	var storageKey string
 	var publicURL string
 
-	switch u.Target {
-	case "local":
-		rel := filepath.Join("files", id+"_"+u.FileName)
-		finalPath := filepath.Join(s.cfg.DataDir, rel)
-		if err := os.Rename(assembled, finalPath); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "move local file failed"})
-			return
-		}
-		storageKey = rel
-
-	case "silo":
+	if u.Target == "silo" {
+		// Stream chunks directly to Silo (single PutObject for 1 part, S3 Multipart for >1 parts) without doubling disk writes!
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+		cacheCtrl := "public, max-age=2592000, immutable"
 		objKey := s.resolveCleanSiloKey(ctx, u.SiloPrefix, u.FileName)
-		f, err := os.Open(assembled)
-		if err != nil {
-			cancel()
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "reopen assembled failed"})
-			return
+
+		if u.TotalParts <= 1 {
+			partPath := filepath.Join(stagingDir, "part.000001")
+			pf, err := os.Open(partPath)
+			if err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing part 1"})
+				return
+			}
+			st, stErr := pf.Stat()
+			if stErr != nil {
+				pf.Close()
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "stat part 1 failed"})
+				return
+			}
+			if u.Size > 0 && st.Size() != u.Size {
+				pf.Close()
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("size mismatch: got %d expected %d", st.Size(), u.Size)})
+				return
+			}
+			putErr := s.cfg.S3.PutObject(ctx, objKey, io.TeeReader(pf, hasher), st.Size(), u.MimeType, cacheCtrl)
+			pf.Close()
+			if putErr != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upload to Silo failed: " + putErr.Error()})
+				return
+			}
+			totalWritten = st.Size()
+		} else {
+			uploadID, err := s.cfg.S3.CreateMultipartUpload(ctx, objKey, u.MimeType, cacheCtrl)
+			if err != nil {
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "init Silo multipart failed: " + err.Error()})
+				return
+			}
+			completedParts := make([]s3client.CompletedPart, 0, u.TotalParts)
+			for p := 1; p <= u.TotalParts; p++ {
+				partPath := filepath.Join(stagingDir, fmt.Sprintf("part.%06d", p))
+				pf, pErr := os.Open(partPath)
+				if pErr != nil {
+					_ = s.cfg.S3.AbortMultipartUpload(ctx, objKey, uploadID)
+					writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("missing part %d", p)})
+					return
+				}
+				st, stErr := pf.Stat()
+				if stErr != nil {
+					pf.Close()
+					_ = s.cfg.S3.AbortMultipartUpload(ctx, objKey, uploadID)
+					writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "stat part failed"})
+					return
+				}
+				etag, upErr := s.cfg.S3.UploadPart(ctx, objKey, uploadID, p, io.TeeReader(pf, hasher), st.Size())
+				pf.Close()
+				_ = os.Remove(partPath)
+				if upErr != nil {
+					_ = s.cfg.S3.AbortMultipartUpload(ctx, objKey, uploadID)
+					writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upload Silo part failed: " + upErr.Error()})
+					return
+				}
+				totalWritten += st.Size()
+				completedParts = append(completedParts, s3client.CompletedPart{PartNumber: p, ETag: etag})
+			}
+			if u.Size > 0 && totalWritten != u.Size {
+				_ = s.cfg.S3.AbortMultipartUpload(ctx, objKey, uploadID)
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("size mismatch: got %d expected %d", totalWritten, u.Size)})
+				return
+			}
+			if err := s.cfg.S3.CompleteMultipartUpload(ctx, objKey, uploadID, completedParts); err != nil {
+				_ = s.cfg.S3.AbortMultipartUpload(ctx, objKey, uploadID)
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "complete Silo multipart failed: " + err.Error()})
+				return
+			}
 		}
-		putErr := s.cfg.S3.PutObject(ctx, objKey, f, totalWritten, u.MimeType, "public, max-age=2592000, immutable")
-		cancel()
-		f.Close()
-		if putErr != nil {
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upload to Silo failed: " + putErr.Error()})
-			return
-		}
+
+		shaFull = hex.EncodeToString(hasher.Sum(nil))
 		u.FileName = path.Base(objKey)
 		storageKey = objKey
 		publicURL = s.cfg.S3.PublicObjectURL(objKey)
 		s.invalidateMediaCache()
 		s.broadcast("media.refresh", map[string]string{"key": objKey})
-
-	case "gdrive":
-		var relKey string
-		switch u.GDriveFolder {
-		case "":
-			relKey = ym + "/" + u.FileName
-		case "/":
-			relKey = u.FileName
-		default:
-			relKey = u.GDriveFolder + "/" + u.FileName
-		}
-		dest := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + relKey
-		args := s.rcloneArgs("copyto", assembled, dest)
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
-		cmd := exec.CommandContext(ctx, s.cfg.RcloneBin, args...)
-		outBytes, runErr := cmd.CombinedOutput()
-		cancel()
-		if runErr != nil {
-			log.Printf("[oarc-drop] rclone copyto failed: %v (%s)", runErr, strings.TrimSpace(string(outBytes)))
-			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upload to Google Drive failed"})
+	} else {
+		assembled := filepath.Join(stagingDir, "assembled.bin")
+		out, err := os.OpenFile(assembled, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "assemble open failed"})
 			return
 		}
-		storageKey = relKey
+		for p := 1; p <= u.TotalParts; p++ {
+			partPath := filepath.Join(stagingDir, fmt.Sprintf("part.%06d", p))
+			pf, err := os.Open(partPath)
+			if err != nil {
+				out.Close()
+				writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("missing part %d", p)})
+				return
+			}
+			n, copyErr := io.Copy(io.MultiWriter(out, hasher), pf)
+			pf.Close()
+			_ = os.Remove(partPath) // free disk immediately as we stitch!
+			if copyErr != nil {
+				out.Close()
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "stitch failed"})
+				return
+			}
+			totalWritten += n
+		}
+		if err := out.Close(); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "close assembled failed"})
+			return
+		}
+		if u.Size > 0 && totalWritten != u.Size {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("size mismatch: got %d expected %d", totalWritten, u.Size)})
+			return
+		}
+		shaFull = hex.EncodeToString(hasher.Sum(nil))
+
+		switch u.Target {
+		case "local":
+			rel := filepath.Join("files", id+"_"+u.FileName)
+			finalPath := filepath.Join(s.cfg.DataDir, rel)
+			if err := os.Rename(assembled, finalPath); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "move local file failed"})
+				return
+			}
+			storageKey = rel
+
+		case "gdrive":
+			var dirRel string
+			switch u.GDriveFolder {
+			case "":
+				dirRel = ym
+			case "/":
+				dirRel = ""
+			default:
+				dirRel = u.GDriveFolder
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
+			relKey := s.resolveCleanDriveRelKey(ctx, dirRel, u.FileName)
+			dest := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + relKey
+			args := s.rcloneArgs("copyto", assembled, dest)
+			cmd := exec.CommandContext(ctx, s.cfg.RcloneBin, args...)
+			outBytes, runErr := cmd.CombinedOutput()
+			cancel()
+			if runErr != nil {
+				log.Printf("[oarc-drop] rclone copyto failed: %v (%s)", runErr, strings.TrimSpace(string(outBytes)))
+				writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upload to Google Drive failed"})
+				return
+			}
+			u.FileName = path.Base(relKey)
+			storageKey = relKey
+		}
 	}
 
 	var sh *store.ShareItem
@@ -945,14 +1073,37 @@ func (s *Server) handleCreateShareFromSilo(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusCreated, sh)
 }
 
+func (s *Server) handleUpdateShare(w http.ResponseWriter, r *http.Request) {
+	code := r.PathValue("code")
+	var req struct {
+		TTLHours     *int    `json:"ttlHours"`
+		MaxDownloads *int    `json:"maxDownloads"`
+		Passcode     *string `json:"passcode"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+	updated, err := s.store.UpdateShareOptions(code, req.TTLHours, req.MaxDownloads, req.Passcode)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "share not found"})
+		return
+	}
+	s.broadcast("share.updated", updated)
+	writeJSON(w, http.StatusOK, updated)
+}
+
 func (s *Server) handleDeleteShare(w http.ResponseWriter, r *http.Request) {
 	code := r.PathValue("code")
-	_, _, err := s.store.DeleteShare(code)
+	_, updatedClips, _, err := s.store.DeleteShare(code)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 		return
 	}
 	s.broadcast("share.deleted", map[string]string{"code": code})
+	for _, c := range updatedClips {
+		s.broadcast("clip.updated", c)
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
@@ -962,6 +1113,12 @@ func (s *Server) invalidateMediaCache() {
 	s.mediaMu.Lock()
 	s.mediaFetched = time.Time{}
 	s.mediaMu.Unlock()
+}
+
+func (s *Server) evictTrackCache(key string) {
+	s.trackMu.Lock()
+	delete(s.trackCache, key)
+	s.trackMu.Unlock()
 }
 
 func (s *Server) ensureMediaIndex(ctx context.Context, force bool) ([]MediaItem, error) {
@@ -1289,6 +1446,8 @@ func (s *Server) handlePublicShareMeta(w http.ResponseWriter, r *http.Request) {
 		resp["size"] = sh.Size
 		resp["sha256"] = sh.SHA256
 		resp["storage"] = sh.Storage
+		resp["downloads"] = sh.Downloads
+		resp["maxDownloads"] = sh.MaxDownloads
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1306,11 +1465,13 @@ func (s *Server) handlePublicShareVerify(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "提取码不正确"})
 		return
 	}
+	isHTTPS := r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 	http.SetCookie(w, &http.Cookie{
 		Name:     "oarc_share_" + code,
 		Value:    s.signShareToken(code),
 		Path:     "/s/" + code,
 		HttpOnly: true,
+		Secure:   isHTTPS,
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   86400,
 	})
@@ -1332,12 +1493,20 @@ func (s *Server) handlePublicShareRaw(w http.ResponseWriter, r *http.Request) {
 	}
 
 	isDownload := r.URL.Query().Get("download") == "1"
-	// Count once per explicit download or initial byte-0 fetch (don't over-count audio range seeks)
+	isPreview := r.URL.Query().Get("preview") == "1"
 	rangeHdr := r.Header.Get("Range")
-	if isDownload || rangeHdr == "" || strings.HasPrefix(rangeHdr, "bytes=0-") {
+	// Never consume download quota on HEAD probes, inline page previews (?preview=1), or Safari 2-byte media probes (bytes=0-1).
+	shouldCount := r.Method != http.MethodHead && !isPreview && rangeHdr != "bytes=0-1" &&
+		(isDownload || rangeHdr == "" || strings.HasPrefix(rangeHdr, "bytes=0-"))
+	if shouldCount {
 		if err := s.store.IncrementShareDownload(code); err != nil {
 			http.Error(w, "Download limit reached", http.StatusGone)
 			return
+		}
+		if latest, lErr := s.store.GetShare(code); lErr == nil {
+			s.broadcast("share.updated", latest)
+		} else if errors.Is(lErr, store.ErrExpired) {
+			s.broadcast("share.deleted", map[string]string{"code": code})
 		}
 	}
 

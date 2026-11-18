@@ -16,6 +16,7 @@ import type {
 } from '../types'
 
 const status = ref<ServerStatus | null>(null)
+const onlineClients = ref<number>(1)
 const clips = ref<ClipItem[]>([])
 const shares = ref<ShareItem[]>([])
 const mediaItems = ref<MediaItem[]>([])
@@ -23,7 +24,10 @@ const mediaFolders = ref<string[]>([])
 const imageCount = ref(0)
 const audioCount = ref(0)
 
-// Full Vault State
+// Full Vault State — global unified viewMode persisted across all storage pools!
+const vaultViewMode = ref<'grid' | 'list'>(
+  (localStorage.getItem('oarc_vault_view') as 'grid' | 'list') || 'grid',
+)
 const siloObjects = ref<VaultObject[]>([])
 const siloFolders = ref<string[]>([])
 const gdriveFiles = ref<GDriveFile[]>([])
@@ -39,7 +43,7 @@ let toastTimer: number | undefined
 
 const qrModal = ref<QrModalPayload | null>(null)
 
-// Persistent Liquid Glass Music Player State (survives tab switches)
+// Persistent Music Player State (survives tab switches)
 const currentTrack = ref<MediaItem | null>(null)
 const currentMeta = ref<TrackMetadata | null>(null)
 const currentCoverUrl = ref('')
@@ -54,6 +58,47 @@ const audioVolume = ref<number>(
   Number(localStorage.getItem('oarc_volume') ?? '0.9') || 0.9,
 )
 const activeQueueKeys = ref<string[]>([])
+
+const SILO_FOLDER_LABELS: Record<string, string> = {
+  images: '图床图片',
+  videos: '图床视频',
+  drop: '快传归档',
+  articles: '文章配图',
+  photos: '相册原图',
+  talks: '说说配图',
+  config: '站点配置',
+  avatar: '站长头像',
+  character: '3D 看板娘',
+  'character/models': '3D 看板娘模型',
+  'music/audio': '歌曲音频',
+  'music/covers/playlists': '歌单封面',
+  'music/covers/tracks': '单曲封面',
+  'music/lyrics': '滚动歌词',
+  '/': '桶根目录',
+}
+
+export function describeSiloFolder(folder: string): string {
+  const clean = (folder || '/').replace(/^\/+|\/+$/g, '') || '/'
+  if (SILO_FOLDER_LABELS[clean]) {
+    return clean === '/' ? '桶根目录 (/)' : `${SILO_FOLDER_LABELS[clean]} (${clean})`
+  }
+  if (clean.startsWith('articles/')) return `文章配图 (${clean})`
+  if (clean.startsWith('photos/')) return `相册资源 (${clean})`
+  if (clean.startsWith('talks/')) return `说说配图 (${clean})`
+  if (clean.startsWith('config/')) return `站点配置 (${clean})`
+  if (clean.startsWith('character/')) return `看板娘资源 (${clean})`
+  if (clean.startsWith('music/')) return `音乐资源 (${clean})`
+  if (clean.startsWith('images/')) return `图床图片 (${clean})`
+  if (clean.startsWith('drop/')) return `快传归档 (${clean})`
+  return clean
+}
+
+export function sortClips(list: ClipItem[]): ClipItem[] {
+  return list.slice().sort((a, b) => {
+    if (a.pinned !== b.pinned) return a.pinned ? -1 : 1
+    return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+  })
+}
 
 export function showToast(msg: string) {
   toastText.value = msg
@@ -126,7 +171,6 @@ export async function copyImagePixels(srcUrl: string) {
       showToast('原图已写入系统剪贴板，可直接 ⌘V 粘贴')
       return
     }
-    // Convert JPEG/WebP to PNG blob for universal ClipboardItem compatibility
     const bmpUrl = URL.createObjectURL(blob)
     try {
       const pngBlob = await new Promise<Blob>((resolve, reject) => {
@@ -245,12 +289,25 @@ export function resetAmbientColors() {
 }
 
 export function useDropStore() {
-  function openQrModal(title: string, url: string, subtitle?: string) {
-    qrModal.value = { title, url, subtitle }
+  function setVaultViewMode(mode: 'grid' | 'list') {
+    vaultViewMode.value = mode
+    localStorage.setItem('oarc_vault_view', mode)
+  }
+
+  function openQrModal(title: string, url: string, subtitle?: string, shareCode?: string) {
+    qrModal.value = { title, url, subtitle, shareCode }
   }
 
   function closeQrModal() {
     qrModal.value = null
+  }
+
+  function dismissUpload(localId: string) {
+    uploads.value = uploads.value.filter((u) => u.localId !== localId)
+  }
+
+  function pauseAudio() {
+    window.dispatchEvent(new CustomEvent('oarc-audio-pause'))
   }
 
   function setPlayMode(mode: PlayMode) {
@@ -278,19 +335,29 @@ export function useDropStore() {
   }
 
   async function loadInitial() {
-    const [stRes, clipRes, shareRes] = await Promise.all([
-      fetch('/api/status'),
-      fetch('/api/clips'),
-      fetch('/api/shares'),
-    ])
-    if (stRes.ok) status.value = await stRes.json()
-    if (clipRes.ok) {
-      const d = await clipRes.json()
-      clips.value = d.items || []
-    }
-    if (shareRes.ok) {
-      const d = await shareRes.json()
-      shares.value = d.items || []
+    try {
+      const [stRes, clipRes, shareRes] = await Promise.all([
+        fetch('/api/status'),
+        fetch('/api/clips'),
+        fetch('/api/shares'),
+      ])
+      if (stRes.ok) {
+        const stData: ServerStatus = await stRes.json()
+        status.value = stData
+        if (typeof stData.onlineClients === 'number' && stData.onlineClients > 0) {
+          onlineClients.value = stData.onlineClients
+        }
+      }
+      if (clipRes.ok) {
+        const d = await clipRes.json()
+        clips.value = sortClips(d.items || [])
+      }
+      if (shareRes.ok) {
+        const d = await shareRes.json()
+        shares.value = d.items || []
+      }
+    } catch {
+      // ignore transient offline errors on background resync
     }
   }
 
@@ -371,7 +438,7 @@ export function useDropStore() {
       return null
     }
     const updated: ClipItem = await res.json()
-    clips.value = clips.value.map((c) => (c.id === updated.id ? updated : c))
+    clips.value = sortClips(clips.value.map((c) => (c.id === updated.id ? updated : c)))
     if (updated.publicUrl) {
       const isImg = updated.kind === 'image' || (updated.mimeType || '').startsWith('image/')
       const out =
@@ -384,6 +451,7 @@ export function useDropStore() {
       )
     }
     void loadMedia(true)
+    if (siloObjects.value.length > 0) void loadSiloVault(false)
     return updated
   }
 
@@ -399,10 +467,71 @@ export function useDropStore() {
       return null
     }
     const updated: ClipItem = await res.json()
-    clips.value = clips.value.map((c) => (c.id === updated.id ? updated : c))
+    clips.value = sortClips(clips.value.map((c) => (c.id === updated.id ? updated : c)))
     const label = !folder || folder === '/' ? 'OArc-Drop/' : `OArc-Drop/${folder}/`
-    showToast(`已存入 Drive：${label}`)
+    showToast(`已存入 Drive：${label}${updated.gdrivePath ? updated.gdrivePath.split('/').pop() : ''}`)
     if (gdriveFiles.value.length > 0) void loadGDriveFiles()
+    return updated
+  }
+
+  async function toggleClipPin(item: ClipItem) {
+    const res = await fetch(`/api/clips/${item.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pinned: !item.pinned }),
+    })
+    if (!res.ok) return null
+    const updated: ClipItem = await res.json()
+    clips.value = sortClips(clips.value.map((c) => (c.id === updated.id ? updated : c)))
+    return updated
+  }
+
+  async function renameClip(id: string, newFileName: string) {
+    const clean = newFileName.trim()
+    if (!clean) return null
+    const res = await fetch(`/api/clips/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fileName: clean }),
+    })
+    if (!res.ok) {
+      showToast('修改文件名失败')
+      return null
+    }
+    const updated: ClipItem = await res.json()
+    clips.value = sortClips(clips.value.map((c) => (c.id === updated.id ? updated : c)))
+    showToast(`已改名为：${updated.fileName}`)
+    return updated
+  }
+
+  async function clearUnpinnedClips() {
+    const res = await fetch('/api/clips/clear-unpinned', { method: 'POST' })
+    if (!res.ok) {
+      showToast('清理失败')
+      return 0
+    }
+    const d: { removed: number; ids?: string[] } = await res.json()
+    clips.value = clips.value.filter((c) => c.pinned)
+    showToast(d.removed > 0 ? `已清理 ${d.removed} 条未置顶内容` : '暂无可清理的未置顶项')
+    return d.removed
+  }
+
+  async function updateShareOptions(
+    code: string,
+    opts: { ttlHours?: number; maxDownloads?: number; passcode?: string },
+  ) {
+    const res = await fetch(`/api/shares/${code}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(opts),
+    })
+    if (!res.ok) {
+      showToast('更新外链设置失败')
+      return null
+    }
+    const updated: ShareItem = await res.json()
+    shares.value = shares.value.map((s) => (s.code === code ? updated : s))
+    showToast('外链权限已实时生效')
     return updated
   }
 
@@ -416,15 +545,39 @@ export function useDropStore() {
 
   function connectSSE(): () => void {
     const es = new EventSource('/api/events')
+    let hasConnectedOnce = false
+
+    es.addEventListener('connected', (e) => {
+      try {
+        const d = JSON.parse((e as MessageEvent).data)
+        if (typeof d.online === 'number') onlineClients.value = d.online
+      } catch {
+        // ignore
+      }
+      if (hasConnectedOnce) {
+        void loadInitial()
+      }
+      hasConnectedOnce = true
+    })
+
+    es.addEventListener('presence', (e) => {
+      try {
+        const d = JSON.parse((e as MessageEvent).data)
+        if (typeof d.online === 'number') onlineClients.value = d.online
+      } catch {
+        // ignore
+      }
+    })
+
     es.addEventListener('clip.created', (e) => {
       const item: ClipItem = JSON.parse((e as MessageEvent).data)
       if (!clips.value.some((c) => c.id === item.id)) {
-        clips.value = [item, ...clips.value]
+        clips.value = sortClips([item, ...clips.value])
       }
     })
     es.addEventListener('clip.updated', (e) => {
       const item: ClipItem = JSON.parse((e as MessageEvent).data)
-      clips.value = clips.value.map((c) => (c.id === item.id ? item : c))
+      clips.value = sortClips(clips.value.map((c) => (c.id === item.id ? item : c)))
     })
     es.addEventListener('clip.deleted', (e) => {
       const { id } = JSON.parse((e as MessageEvent).data)
@@ -436,6 +589,10 @@ export function useDropStore() {
         shares.value = [item, ...shares.value]
       }
     })
+    es.addEventListener('share.updated', (e) => {
+      const item: ShareItem = JSON.parse((e as MessageEvent).data)
+      shares.value = shares.value.map((s) => (s.code === item.code ? item : s))
+    })
     es.addEventListener('share.deleted', (e) => {
       const { code } = JSON.parse((e as MessageEvent).data)
       shares.value = shares.value.filter((s) => s.code !== code)
@@ -444,7 +601,18 @@ export function useDropStore() {
       void loadMedia(true)
       if (siloObjects.value.length > 0) void loadSiloVault(false)
     })
-    return () => es.close()
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void loadInitial()
+      }
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+
+    return () => {
+      es.close()
+      document.removeEventListener('visibilitychange', onVisibility)
+    }
   }
 
   async function sendTextClip(text: string) {
@@ -456,12 +624,13 @@ export function useDropStore() {
     if (!res.ok) throw new Error('发送失败')
     const item: ClipItem = await res.json()
     if (!clips.value.some((c) => c.id === item.id)) {
-      clips.value = [item, ...clips.value]
+      clips.value = sortClips([item, ...clips.value])
     }
     showToast('文本已同步至收发台')
     return item
   }
 
+  // Smooth real-time progress bar even for quick <=20 MiB pastes & screenshots (never abruptly pops in!)
   async function sendQuickPasteFile(
     file: File,
     opts?: {
@@ -487,30 +656,103 @@ export function useDropStore() {
       })
       return
     }
+
+    const abortCtrl = new AbortController()
+    const totalSize = Math.max(1, file.size)
+    const task = reactive<UploadTask>({
+      localId: `paste-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      fileName: file.name || '粘贴文件',
+      size: totalSize,
+      target,
+      uploadedBytes: 0,
+      speedBps: 0,
+      status: 'uploading',
+      abortCtrl,
+    })
+    uploads.value = [task, ...uploads.value]
+    const startedAt = performance.now()
+
     const fd = new FormData()
     fd.append('file', file)
     fd.append('target', target)
     if (prefix) fd.append('prefix', prefix)
-    const res = await fetch('/api/clips/file', { method: 'POST', body: fd })
-    if (!res.ok) throw new Error('上传失败')
-    const item: ClipItem = await res.json()
-    if (!clips.value.some((c) => c.id === item.id)) {
-      clips.value = [item, ...clips.value]
-    }
-    if (target === 'silo' && item.publicUrl) {
-      if (autoCopy === 'md') {
-        await copyText(
-          formatMarkdownImage(item.fileName || file.name, item.publicUrl),
-          '已传图床并复制 Markdown 链接',
-        )
-      } else if (autoCopy === 'url') {
-        await copyText(item.publicUrl, '已传图床并复制公网直链')
-      } else {
-        showToast(`已传图床：${item.fileName}`)
+
+    try {
+      const item = await new Promise<ClipItem>((resolve, reject) => {
+        const xhr = new XMLHttpRequest()
+        xhr.open('POST', '/api/clips/file')
+
+        const onAbort = () => xhr.abort()
+        abortCtrl.signal.addEventListener('abort', onAbort, { once: true })
+
+        xhr.upload.onprogress = (ev) => {
+          if (ev.lengthComputable) {
+            task.uploadedBytes = Math.min(totalSize, ev.loaded)
+            const elapsedSec = Math.max(0.08, (performance.now() - startedAt) / 1000)
+            task.speedBps = ev.loaded / elapsedSec
+          }
+        }
+        xhr.onload = () => {
+          abortCtrl.signal.removeEventListener('abort', onAbort)
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              resolve(JSON.parse(xhr.responseText))
+            } catch {
+              reject(new Error('解析响应失败'))
+            }
+          } else {
+            try {
+              const errObj = JSON.parse(xhr.responseText)
+              reject(new Error(errObj.error || `上传失败 (${xhr.status})`))
+            } catch {
+              reject(new Error(`上传失败 (${xhr.status})`))
+            }
+          }
+        }
+        xhr.onerror = () => {
+          abortCtrl.signal.removeEventListener('abort', onAbort)
+          reject(new Error('网络传输中断'))
+        }
+        xhr.onabort = () => {
+          abortCtrl.signal.removeEventListener('abort', onAbort)
+          reject(new Error('aborted'))
+        }
+        xhr.send(fd)
+      })
+
+      task.uploadedBytes = totalSize
+      // Ensure ultra-fast local pastes still play a crisp 220ms progress fill animation before collapsing
+      const elapsed = performance.now() - startedAt
+      if (elapsed < 240) {
+        await new Promise((r) => window.setTimeout(r, 240 - elapsed))
       }
-      void loadMedia(true)
-    } else {
-      showToast(`已同步：${item.fileName || file.name}`)
+      task.status = 'done'
+
+      if (!clips.value.some((c) => c.id === item.id)) {
+        clips.value = sortClips([item, ...clips.value])
+      }
+      if (target === 'silo' && item.publicUrl) {
+        if (autoCopy === 'md') {
+          await copyText(
+            formatMarkdownImage(item.fileName || file.name, item.publicUrl),
+            '已传图床并复制 Markdown 链接',
+          )
+        } else if (autoCopy === 'url') {
+          await copyText(item.publicUrl, '已传图床并复制公网直链')
+        } else {
+          showToast(`已传图床：${item.fileName}`)
+        }
+        void loadMedia(true)
+      } else {
+        showToast(`已同步：${item.fileName || file.name}`)
+      }
+    } catch (e: unknown) {
+      if (abortCtrl.signal.aborted) {
+        task.status = 'canceled'
+      } else {
+        task.status = 'error'
+        task.error = e instanceof Error ? e.message : '上传失败'
+      }
     }
   }
 
@@ -627,7 +869,7 @@ export function useDropStore() {
       task.status = 'done'
       task.publicUrl = compData.publicUrl
       if (compData.clip && !clips.value.some((c) => c.id === compData.clip?.id)) {
-        clips.value = [compData.clip, ...clips.value]
+        clips.value = sortClips([compData.clip, ...clips.value])
       }
       if (compData.share) {
         task.shareCode = compData.share.code
@@ -660,7 +902,7 @@ export function useDropStore() {
           await copyText(compData.publicUrl, '已传图床并复制直链')
         }
       } else {
-        showToast(`上传完成：${file.name}`)
+        showToast(`上传完成：${compData.clip?.fileName || file.name}`)
       }
     } catch (e: unknown) {
       if (abortCtrl.signal.aborted) {
@@ -678,6 +920,8 @@ export function useDropStore() {
       activeQueueKeys.value = queue.map((t) => t.key)
     }
     const parsed = parseTrackDisplayName(track, catalogTracks.value)
+    audioProgress.value = 0
+    audioDuration.value = 0
     currentTrack.value = track
     currentMeta.value = {
       title: parsed.title,
@@ -693,7 +937,6 @@ export function useDropStore() {
     const res = await fetch(`/api/media/track-meta?key=${encodeURIComponent(track.key)}`)
     if (res.ok && currentTrack.value?.key === track.key) {
       const d: { meta: TrackMetadata; coverUrl: string; lyrics: string } = await res.json()
-      // Prefer clean DB/filename title & artist if ID3 was blank or garbled
       currentMeta.value = {
         ...d.meta,
         title: parsed.title || d.meta.title,
@@ -712,6 +955,7 @@ export function useDropStore() {
 
   return {
     status,
+    onlineClients,
     clips,
     shares,
     mediaItems,
@@ -720,6 +964,8 @@ export function useDropStore() {
     audioCount,
     audioTracks,
     imageItems,
+    vaultViewMode,
+    setVaultViewMode,
     siloObjects,
     siloFolders,
     gdriveFiles,
@@ -741,6 +987,8 @@ export function useDropStore() {
     activeQueueKeys,
     openQrModal,
     closeQrModal,
+    dismissUpload,
+    pauseAudio,
     setPlayMode,
     cyclePlayMode,
     setVolume,
@@ -752,6 +1000,10 @@ export function useDropStore() {
     createGDriveFolder,
     promoteClipToSilo,
     archiveClipToGDrive,
+    toggleClipPin,
+    renameClip,
+    clearUnpinnedClips,
+    updateShareOptions,
     loadMusicCatalog,
     connectSSE,
     sendTextClip,

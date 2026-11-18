@@ -122,14 +122,14 @@
 html, body {
   margin: 0;
   padding: 0;
-  height: 100%;
+  min-height: 100%;
   font-family: var(--font-sans);
   color: var(--ink-1);
   background-color: var(--bg-outer);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   letter-spacing: -0.014em;
-  overflow-x: hidden;
+  overflow-x: clip;
   transition: background-color 0.35s ease, color 0.22s ease;
 }
 
@@ -464,4 +464,39 @@ button, input, textarea, select {
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Global Spinner & Spring Modal Transitions */
+.spin-anim,
+.is-spinning {
+  animation: oarc-spin 0.78s linear infinite;
+}
+
+@keyframes oarc-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.lens-modal-enter-active,
+.lens-modal-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.lens-modal-enter-active > *,
+.lens-modal-leave-active > * {
+  transition:
+    transform 0.26s var(--ease-spring),
+    opacity 0.18s ease;
+}
+
+.lens-modal-enter-from,
+.lens-modal-leave-to {
+  opacity: 0;
+}
+
+.lens-modal-enter-from > *,
+.lens-modal-leave-to > * {
+  opacity: 0;
+  transform: translateY(8px) scale(0.95);
 }

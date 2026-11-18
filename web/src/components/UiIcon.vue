@@ -42,6 +42,9 @@ withDefaults(
       | 'clipboard'
       | 'eye'
       | 'cloud'
+      | 'spinner'
+      | 'video'
+      | 'broom'
     size?: number
   }>(),
   { size: 16 },
@@ -238,6 +241,19 @@ withDefaults(
     </template>
     <template v-else-if="name === 'cloud'">
       <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
+    </template>
+    <template v-else-if="name === 'spinner'">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-opacity="0.24" stroke-width="2.3" />
+      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" stroke-width="2.3" />
+    </template>
+    <template v-else-if="name === 'video'">
+      <rect x="2" y="5" width="14" height="14" rx="2.5" />
+      <path d="m16 10 6-3.5v11L16 14Z" />
+    </template>
+    <template v-else-if="name === 'broom'">
+      <path d="m13 11 9-9" />
+      <path d="M14.6 12.6c.8.8.9 2.1.2 3L10 22l-8-8 6.4-4.8c.9-.7 2.2-.6 3 .2Z" />
+      <path d="m6.8 10.5 6.7 6.7" />
     </template>
   </svg>
 </template>

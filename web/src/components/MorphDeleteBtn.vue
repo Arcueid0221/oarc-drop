@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref } from 'vue'
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import UiIcon from './UiIcon.vue'
 
 const props = withDefaults(
   defineProps<{
     title?: string
     confirmLabel?: string
+    busyLabel?: string
+    busy?: boolean
     protectedItem?: boolean
     protectedTitle?: string
     protectedMessage?: string
@@ -14,6 +16,8 @@ const props = withDefaults(
   {
     title: '删除',
     confirmLabel: '确认删除',
+    busyLabel: '删除中…',
+    busy: false,
     protectedItem: false,
     protectedTitle: '受保护的博客资源',
     protectedMessage: '该文件位于博客生产目录，删除可能导致线上已发布的文章或歌单出现死链。确定仍要强制永久删除吗？',
@@ -38,6 +42,7 @@ function disarm() {
 }
 
 function onTriggerClick() {
+  if (props.busy) return
   if (props.protectedItem) {
     showLockSheet.value = true
     return
@@ -50,24 +55,43 @@ function onTriggerClick() {
 }
 
 function onConfirmInline() {
+  if (props.busy) return
   disarm()
   emit('confirm', false)
 }
 
 function onConfirmForce() {
+  if (props.busy) return
   showLockSheet.value = false
   emit('confirm', true)
 }
 
+function onKeyDown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    if (showLockSheet.value) showLockSheet.value = false
+    if (armed.value) disarm()
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('keydown', onKeyDown)
+})
+
 onBeforeUnmount(() => {
   if (resetTimer) window.clearTimeout(resetTimer)
+  window.removeEventListener('keydown', onKeyDown)
 })
 </script>
 
 <template>
   <div class="morph-del-wrap" @click.stop>
     <Transition name="morph-pop" mode="out-in">
-      <div v-if="armed" key="armed" class="morph-armed">
+      <div v-if="busy" key="busy" class="morph-busy" :class="{ 'is-compact': compact }">
+        <UiIcon name="spinner" :size="compact ? 13 : 13.5" class="spin-anim" />
+        <span v-if="!compact">{{ busyLabel }}</span>
+      </div>
+
+      <div v-else-if="armed" key="armed" class="morph-armed">
         <button type="button" class="morph-yes" @click="onConfirmInline">
           {{ confirmLabel }}
         </button>
@@ -90,7 +114,7 @@ onBeforeUnmount(() => {
     </Transition>
 
     <Teleport to="body">
-      <Transition name="sheet-fade">
+      <Transition name="lens-modal">
         <div v-if="showLockSheet" class="lock-backdrop" @click.self="showLockSheet = false">
           <div class="liquid-chrome lock-dialog" role="alertdialog" aria-modal="true">
             <div class="lock-head">
@@ -103,8 +127,9 @@ onBeforeUnmount(() => {
             <p class="lock-desc">{{ protectedMessage }}</p>
             <div class="lock-foot">
               <button type="button" class="pill-btn" @click="showLockSheet = false">取消</button>
-              <button type="button" class="pill-btn lock-danger-btn" @click="onConfirmForce">
-                强制删除
+              <button type="button" class="pill-btn lock-danger-btn" :disabled="busy" @click="onConfirmForce">
+                <UiIcon v-if="busy" name="spinner" :size="13.5" class="spin-anim" />
+                <span>强制删除</span>
               </button>
             </div>
           </div>
@@ -155,6 +180,29 @@ onBeforeUnmount(() => {
   transform: scale(0.92);
 }
 
+.morph-busy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 31px;
+  padding: 0 10px;
+  border-radius: 9px;
+  background: var(--danger-bg);
+  border: 1px solid rgba(220, 38, 38, 0.28);
+  color: var(--danger-fg);
+  font-size: 0.74rem;
+  font-weight: 620;
+  white-space: nowrap;
+}
+
+.morph-busy.is-compact {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 7px;
+}
+
 .morph-armed {
   display: inline-flex;
   align-items: center;
@@ -202,8 +250,8 @@ onBeforeUnmount(() => {
 .morph-pop-enter-active,
 .morph-pop-leave-active {
   transition:
-    transform 0.24s var(--ease-bounce),
-    opacity 0.16s ease;
+    transform 0.22s var(--ease-bounce),
+    opacity 0.15s ease;
 }
 .morph-pop-enter-from,
 .morph-pop-leave-to {
@@ -253,14 +301,17 @@ onBeforeUnmount(() => {
 }
 
 .lock-title {
-  font-size: 0.94rem;
+  font-size: 0.92rem;
   font-weight: 660;
   color: var(--ink-1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .lock-desc {
   margin: 0;
-  font-size: 0.82rem;
+  font-size: 0.81rem;
   line-height: 1.55;
   color: var(--ink-2);
 }
@@ -269,7 +320,7 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .lock-danger-btn {
@@ -281,14 +332,5 @@ onBeforeUnmount(() => {
   background: var(--danger-solid);
   opacity: 0.9;
   border-color: transparent;
-}
-
-.sheet-fade-enter-active,
-.sheet-fade-leave-active {
-  transition: opacity 0.2s ease;
-}
-.sheet-fade-enter-from,
-.sheet-fade-leave-to {
-  opacity: 0;
 }
 </style>

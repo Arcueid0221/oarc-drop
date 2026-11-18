@@ -18,7 +18,10 @@ const trackScrollEl = ref<HTMLElement | null>(null)
 
 const scrubEl = ref<HTMLElement | null>(null)
 const isScrubbing = ref(false)
+const scrubPreviewSec = ref(0)
 const jellyStretch = ref(0)
+const sharingTrackKey = ref('')
+const refreshingMusic = ref(false)
 
 // Spring rebound state when switching between lyric & instrumental tracks
 const reboundState = ref<'none' | 'collapse' | 'expand'>('none')
@@ -34,7 +37,13 @@ onMounted(() => {
 })
 
 async function refreshMusic() {
-  await Promise.all([store.loadMedia(true), store.loadMusicCatalog(true)])
+  if (refreshingMusic.value) return
+  refreshingMusic.value = true
+  try {
+    await Promise.all([store.loadMedia(true), store.loadMusicCatalog(true)])
+  } finally {
+    refreshingMusic.value = false
+  }
 }
 
 const filteredTracks = computed(() => {
@@ -74,17 +83,21 @@ watch(hasLyricStage, (nowHas, prevHas) => {
   }, 560)
 })
 
+const displayedProgressSec = computed(() =>
+  isScrubbing.value ? scrubPreviewSec.value : store.audioProgress.value,
+)
+
 const progressRatio = computed(() => {
   const dur = store.audioDuration.value
   if (!dur || dur <= 0) return 0
-  return Math.min(1, Math.max(0, store.audioProgress.value / dur))
+  return Math.min(1, Math.max(0, displayedProgressSec.value / dur))
 })
 
 const activeLyricIndex = computed(() => {
   const lines = store.currentLyrics.value
   if (!lines.length) return -1
-  const t = store.audioProgress.value
-  let idx = 0
+  const t = displayedProgressSec.value
+  let idx = -1
   for (let i = 0; i < lines.length; i++) {
     if (t >= lines[i].time) idx = i
     else break
@@ -155,7 +168,7 @@ function stepTrack(delta: number) {
   window.dispatchEvent(new CustomEvent('oarc-audio-step', { detail: delta }))
 }
 
-function seekFromClientX(clientX: number) {
+function updateScrubPreviewFromX(clientX: number) {
   const el = scrubEl.value
   const dur = store.audioDuration.value
   if (!el || !dur) return
@@ -166,21 +179,30 @@ function seekFromClientX(clientX: number) {
   else jellyStretch.value = 0
 
   const clamped = Math.min(1, Math.max(0, raw))
-  seekToTime(clamped * dur)
+  scrubPreviewSec.value = clamped * dur
 }
 
 function onScrubDown(e: PointerEvent) {
+  if (!store.audioDuration.value) return
   isScrubbing.value = true
   ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
-  seekFromClientX(e.clientX)
+  updateScrubPreviewFromX(e.clientX)
 }
 
 function onScrubMove(e: PointerEvent) {
   if (!isScrubbing.value) return
-  seekFromClientX(e.clientX)
+  updateScrubPreviewFromX(e.clientX)
 }
 
 function onScrubUp() {
+  if (!isScrubbing.value) return
+  const targetSec = scrubPreviewSec.value
+  isScrubbing.value = false
+  jellyStretch.value = 0
+  seekToTime(targetSec)
+}
+
+function onScrubCancel() {
   isScrubbing.value = false
   jellyStretch.value = 0
 }
@@ -191,22 +213,31 @@ onBeforeUnmount(() => {
 })
 
 async function shareTrack(track: MediaItem) {
-  const res = await fetch('/api/shares/create', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      storage: 'silo',
-      key: track.key,
-      fileName: track.name,
-      size: track.size,
-      ttlHours: 0,
-    }),
-  })
-  if (res.ok) {
-    const sh = await res.json()
-    const url = shareFullUrl(sh.code)
-    await copyText(url, '歌曲公开短链已复制')
-    store.openQrModal(track.name, url, '免登录扫码试听或下载')
+  if (sharingTrackKey.value === track.key) return
+  sharingTrackKey.value = track.key
+  try {
+    const res = await fetch('/api/shares/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        storage: 'silo',
+        key: track.key,
+        fileName: track.name,
+        size: track.size,
+        ttlHours: 168,
+      }),
+    })
+    if (res.ok) {
+      const sh = await res.json()
+      if (!store.shares.value.some((s) => s.code === sh.code)) {
+        store.shares.value = [sh, ...store.shares.value]
+      }
+      const url = shareFullUrl(sh.code)
+      await copyText(url, '歌曲公开短链已复制')
+      store.openQrModal(track.name, url, '免登录扫码试听或下载 · 可设提取码', sh.code)
+    }
+  } finally {
+    sharingTrackKey.value = ''
   }
 }
 
@@ -256,7 +287,7 @@ const playModeLabel = computed(() => {
             <span class="hide-xs">定位当前</span>
           </button>
           <button type="button" class="icon-circle-btn" title="刷新曲库" @click="refreshMusic">
-            <UiIcon name="refresh" :size="14" />
+            <UiIcon name="refresh" :size="14" :class="{ 'spin-anim': refreshingMusic }" />
           </button>
         </div>
       </header>
@@ -341,13 +372,13 @@ const playModeLabel = computed(() => {
                   @pointerdown="onScrubDown"
                   @pointermove="onScrubMove"
                   @pointerup="onScrubUp"
-                  @pointercancel="onScrubUp"
+                  @pointercancel="onScrubCancel"
                 >
                   <div class="scrub-track">
                     <div class="scrub-fill" :style="{ width: `${progressRatio * 100}%` }" />
                   </div>
                   <div class="scrub-ruler-row mono">
-                    <span>{{ fmtSec(store.audioProgress.value) }}</span>
+                    <span>{{ fmtSec(displayedProgressSec) }}</span>
                     <div class="scrub-ticks" aria-hidden="true">
                       <i v-for="n in 9" :key="n" />
                     </div>
@@ -522,9 +553,14 @@ const playModeLabel = computed(() => {
                 type="button"
                 class="mini-key"
                 title="生成分享短链与二维码"
+                :disabled="sharingTrackKey === tr.key"
                 @click="shareTrack(tr)"
               >
-                <UiIcon name="qr" :size="13" />
+                <UiIcon
+                  :name="sharingTrackKey === tr.key ? 'spinner' : 'qr'"
+                  :size="13"
+                  :class="{ 'spin-anim': sharingTrackKey === tr.key }"
+                />
               </button>
             </div>
           </div>

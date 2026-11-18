@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   copyImagePixels,
   copyText,
@@ -20,19 +20,32 @@ const store = useDropStore()
 
 const draftText = ref('')
 const sendState = ref<'idle' | 'loading' | 'success'>('idle')
-const isDragOver = ref(false)
+const dragDepth = ref(0)
+const isDragOver = computed(() => dragDepth.value > 0)
 const fileInput = ref<HTMLInputElement | null>(null)
 const directDriveFolder = ref('')
 
 // Per-file async busy states (keyed by clip.id)
 const promotingSilo = ref<Record<string, boolean>>({})
 const archivingDrive = ref<Record<string, boolean>>({})
+const deletingClips = ref<Record<string, boolean>>({})
+const sharingClips = ref<Record<string, boolean>>({})
+const clearingUnpinned = ref(false)
+const confirmClearArmed = ref(false)
+let clearArmTimer: number | undefined
+
+// Inline clip filename editing
+const editingClipId = ref('')
+const editingNameDraft = ref('')
+const renamingClipBusy = ref(false)
 
 // Stream filter & inline preview states
 const streamFilter = ref<'all' | 'file' | 'image' | 'text'>('all')
 const expandedIds = ref<Record<string, boolean>>({})
 const inlinePreviewIds = ref<Record<string, boolean>>({})
 const lightboxClip = ref<ClipItem | null>(null)
+
+const unpinnedCount = computed(() => store.clips.value.filter((c) => !c.pinned).length)
 
 async function submitText() {
   const txt = draftText.value
@@ -99,10 +112,24 @@ function onPickedFiles(e: Event) {
   input.value = ''
 }
 
+function onDragEnter(e: DragEvent) {
+  if (!e.dataTransfer?.types.includes('Files')) return
+  dragDepth.value++
+}
+
+function onDragLeave(e: DragEvent) {
+  if (!e.dataTransfer?.types.includes('Files')) return
+  dragDepth.value = Math.max(0, dragDepth.value - 1)
+}
+
 function onDropFiles(e: DragEvent) {
-  isDragOver.value = false
+  dragDepth.value = 0
   if (!e.dataTransfer?.files?.length) return
   dispatchFiles(Array.from(e.dataTransfer.files))
+}
+
+function resetDragDepth() {
+  dragDepth.value = 0
 }
 
 function handleComposerPaste(e: ClipboardEvent) {
@@ -126,7 +153,7 @@ async function pasteFromSystemClipboard() {
         if (imgType) {
           const blob = await item.getType(imgType)
           const ext = imgType.split('/')[1] || 'png'
-          const file = new File([blob], `paste-${Date.now().toString().slice(-5)}.${ext}`, {
+          const file = new File([blob], `image.${ext}`, {
             type: imgType,
           })
           dispatchFiles([file])
@@ -166,41 +193,119 @@ async function onArchiveToDrive(item: ClipItem, folder: string) {
 }
 
 async function togglePin(item: ClipItem) {
-  const res = await fetch(`/api/clips/${item.id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ pinned: !item.pinned }),
-  })
-  if (res.ok) item.pinned = !item.pinned
+  await store.toggleClipPin(item)
+}
+
+async function startInlineRename(item: ClipItem) {
+  editingClipId.value = item.id
+  editingNameDraft.value = item.fileName || ''
+  await nextTick()
+  const el = document.querySelector<HTMLInputElement>(`[data-rename-id="${item.id}"]`)
+  if (el) {
+    el.focus()
+    const dot = el.value.lastIndexOf('.')
+    el.setSelectionRange(0, dot > 0 ? dot : el.value.length)
+  }
+}
+
+async function commitInlineRename(item: ClipItem) {
+  if (renamingClipBusy.value) return
+  const draft = editingNameDraft.value.trim()
+  if (!draft || draft === item.fileName) {
+    editingClipId.value = ''
+    return
+  }
+  renamingClipBusy.value = true
+  try {
+    await store.renameClip(item.id, draft)
+    editingClipId.value = ''
+  } finally {
+    renamingClipBusy.value = false
+  }
 }
 
 async function shareClip(item: ClipItem) {
-  if (item.shareCode) {
+  if (sharingClips.value[item.id]) return
+  const activeShareExists =
+    Boolean(item.shareCode) && store.shares.value.some((s) => s.code === item.shareCode)
+  if (activeShareExists && item.shareCode) {
     const url = shareFullUrl(item.shareCode)
     await copyText(url, '已复制公开分享短链')
-    store.openQrModal(item.fileName || '文本片段', url, '免登录扫码取件')
+    store.openQrModal(
+      item.fileName || '文本片段',
+      url,
+      '可在下方修改提取码、有效期或阅后即焚次数',
+      item.shareCode,
+    )
     return
   }
-  const res = await fetch(`/api/clips/${item.id}/share`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ ttlHours: 168, passcode: '' }),
-  })
-  if (res.ok) {
-    const sh = await res.json()
-    item.shareCode = sh.code
-    if (!store.shares.value.some((s) => s.code === sh.code)) {
-      store.shares.value = [sh, ...store.shares.value]
+  sharingClips.value[item.id] = true
+  try {
+    const res = await fetch(`/api/clips/${item.id}/share`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ttlHours: 168, passcode: '' }),
+    })
+    if (res.ok) {
+      const sh = await res.json()
+      item.shareCode = sh.code
+      if (!store.shares.value.some((s) => s.code === sh.code)) {
+        store.shares.value = [sh, ...store.shares.value]
+      }
+      const url = shareFullUrl(sh.code)
+      await copyText(url, '公开短链已生成并复制')
+      store.openQrModal(
+        item.fileName || '文本片段',
+        url,
+        '可在下方设置提取码、有效期或阅后即焚次数',
+        sh.code,
+      )
     }
-    const url = shareFullUrl(sh.code)
-    await copyText(url, '公开短链已生成并复制')
-    store.openQrModal(item.fileName || '文本片段', url, '7 天有效 · 可在外链管理随时作废')
+  } finally {
+    sharingClips.value[item.id] = false
   }
 }
 
 async function removeClip(item: ClipItem) {
-  await fetch(`/api/clips/${item.id}`, { method: 'DELETE' })
-  store.clips.value = store.clips.value.filter((c) => c.id !== item.id)
+  if (deletingClips.value[item.id]) return
+  deletingClips.value[item.id] = true
+  try {
+    await fetch(`/api/clips/${item.id}`, { method: 'DELETE' })
+    store.clips.value = store.clips.value.filter((c) => c.id !== item.id)
+  } finally {
+    deletingClips.value[item.id] = false
+  }
+}
+
+function armClearUnpinned() {
+  if (clearingUnpinned.value) return
+  confirmClearArmed.value = true
+  if (clearArmTimer) window.clearTimeout(clearArmTimer)
+  clearArmTimer = window.setTimeout(() => {
+    confirmClearArmed.value = false
+  }, 3200)
+}
+
+async function executeClearUnpinned() {
+  if (clearingUnpinned.value) return
+  confirmClearArmed.value = false
+  clearingUnpinned.value = true
+  try {
+    await store.clearUnpinnedClips()
+  } finally {
+    clearingUnpinned.value = false
+  }
+}
+
+function toggleInlinePreview(item: ClipItem) {
+  const next = !inlinePreviewIds.value[item.id]
+  if (next) {
+    const m = (item.mimeType || '').toLowerCase()
+    if (m.startsWith('audio/') || m.startsWith('video/')) {
+      store.pauseAudio()
+    }
+  }
+  inlinePreviewIds.value[item.id] = next
 }
 
 function isLongText(txt?: string) {
@@ -243,19 +348,35 @@ function onHubGlobalPaste(e: Event) {
   if (files?.length) dispatchFiles(files)
 }
 
+function onKeyDown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    if (lightboxClip.value) lightboxClip.value = null
+    if (editingClipId.value) editingClipId.value = ''
+    if (confirmClearArmed.value) confirmClearArmed.value = false
+  }
+}
+
 onMounted(() => {
   window.addEventListener('oarc-hub-files', onHubGlobalPaste)
+  window.addEventListener('dragend', resetDragDepth)
+  window.addEventListener('drop', resetDragDepth)
+  window.addEventListener('keydown', onKeyDown)
 })
 onBeforeUnmount(() => {
   window.removeEventListener('oarc-hub-files', onHubGlobalPaste)
+  window.removeEventListener('dragend', resetDragDepth)
+  window.removeEventListener('drop', resetDragDepth)
+  window.removeEventListener('keydown', onKeyDown)
+  if (clearArmTimer) window.clearTimeout(clearArmTimer)
 })
 </script>
 
 <template>
   <div
     class="hub-page"
-    @dragover.prevent="isDragOver = true"
-    @dragleave.self="isDragOver = false"
+    @dragenter.prevent="onDragEnter"
+    @dragover.prevent
+    @dragleave.prevent="onDragLeave"
     @drop.prevent="onDropFiles"
   >
     <header class="pane-header">
@@ -264,7 +385,7 @@ onBeforeUnmount(() => {
         <span class="pane-count">{{ store.clips.value.length }}</span>
       </div>
 
-      <div class="pane-actions">
+      <div class="pane-actions hub-head-acts">
         <div class="filter-strip">
           <button
             v-for="f in [
@@ -282,6 +403,39 @@ onBeforeUnmount(() => {
             {{ f.l }}
           </button>
         </div>
+
+        <!-- One-tap Clear Unpinned (Morph Confirm + Spinner) -->
+        <Transition name="pop-btn" mode="out-in">
+          <button
+            v-if="clearingUnpinned"
+            key="clr-busy"
+            type="button"
+            class="pill-btn clr-pill is-busy"
+            disabled
+          >
+            <UiIcon name="spinner" :size="13" class="spin-anim" />
+            <span>清理中…</span>
+          </button>
+          <div v-else-if="confirmClearArmed" key="clr-armed" class="clr-armed">
+            <button type="button" class="clr-yes" @click="executeClearUnpinned">
+              清空 {{ unpinnedCount }} 条未置顶
+            </button>
+            <button type="button" class="clr-no" @click="confirmClearArmed = false">
+              <UiIcon name="close" :size="11.5" />
+            </button>
+          </div>
+          <button
+            v-else-if="unpinnedCount > 0"
+            key="clr-idle"
+            type="button"
+            class="pill-btn clr-pill"
+            title="清理所有未置顶的临时记录（保留已置顶项）"
+            @click="armClearUnpinned"
+          >
+            <UiIcon name="broom" :size="13.5" />
+            <span class="hide-xs">清理未置顶</span>
+          </button>
+        </Transition>
       </div>
     </header>
 
@@ -336,27 +490,42 @@ onBeforeUnmount(() => {
               type="button"
               class="pill-btn pill-btn--solid send-text-btn"
               :class="`state-${sendState}`"
+              :disabled="sendState === 'loading'"
               @click="submitText"
             >
-              <UiIcon v-if="sendState === 'success'" name="check" :size="14" />
+              <UiIcon v-if="sendState === 'loading'" name="spinner" :size="14" class="spin-anim" />
+              <UiIcon v-else-if="sendState === 'success'" name="check" :size="14" />
               <UiIcon v-else name="arrow-up" :size="14" />
-              <span>{{ sendState === 'success' ? '已发送' : '发送文字' }}</span>
+              <span>{{ sendState === 'success' ? '已发送' : sendState === 'loading' ? '发送中…' : '发送文字' }}</span>
             </button>
           </Transition>
         </footer>
       </section>
 
-      <!-- Active Chunked Upload Progress -->
-      <div v-if="activeUploads.length > 0" class="upload-queue">
-        <div v-for="u in activeUploads" :key="u.localId" class="glass-box up-row">
+      <!-- Smoothly Animated Upload & Quick-Paste Progress Queue -->
+      <TransitionGroup name="up-fold" tag="div" class="upload-queue">
+        <div
+          v-for="u in activeUploads"
+          :key="u.localId"
+          class="glass-box up-row"
+          :class="{ 'is-error': u.status === 'error' }"
+        >
           <div class="up-top">
+            <UiIcon
+              v-if="u.status === 'uploading' || u.status === 'assembling'"
+              name="spinner"
+              :size="14"
+              class="spin-anim up-spin"
+            />
             <span class="up-name">{{ u.fileName }}</span>
-            <span class="up-stat mono">
+            <span class="up-stat mono" :class="{ 'is-err-txt': u.status === 'error' }">
               <template v-if="u.status === 'uploading'">
-                {{ formatBytes(u.uploadedBytes) }} / {{ formatBytes(u.size) }} · {{ formatBytes(u.speedBps) }}/s
+                {{ u.size ? Math.min(100, Math.round((u.uploadedBytes / u.size) * 100)) : 0 }}% ·
+                {{ formatBytes(u.uploadedBytes) }} / {{ formatBytes(u.size) }}
+                <template v-if="u.speedBps > 0"> · {{ formatBytes(u.speedBps) }}/s</template>
               </template>
-              <template v-else-if="u.status === 'assembling'">合并校验中…</template>
-              <template v-else>{{ u.error }}</template>
+              <template v-else-if="u.status === 'assembling'">正在校验入库…</template>
+              <template v-else>{{ u.error || '上传失败' }}</template>
             </span>
             <button
               v-if="u.status === 'uploading'"
@@ -367,15 +536,30 @@ onBeforeUnmount(() => {
             >
               <UiIcon name="close" :size="12.5" />
             </button>
+            <button
+              v-else-if="u.status === 'error'"
+              type="button"
+              class="icon-circle-btn up-cancel"
+              title="关闭此提示"
+              @click="store.dismissUpload(u.localId)"
+            >
+              <UiIcon name="close" :size="12.5" />
+            </button>
           </div>
           <div class="up-bar">
             <div
               class="up-fill"
-              :style="{ width: `${u.size ? Math.min(100, (u.uploadedBytes / u.size) * 100) : 0}%` }"
+              :class="{ 'is-err-fill': u.status === 'error' }"
+              :style="{
+                width:
+                  u.status === 'error'
+                    ? '100%'
+                    : `${u.size ? Math.min(100, (u.uploadedBytes / u.size) * 100) : 12}%`,
+              }"
             />
           </div>
         </div>
-      </div>
+      </TransitionGroup>
 
       <!-- Empty State -->
       <div v-if="filteredClips.length === 0" class="glass-box empty-state">
@@ -407,20 +591,29 @@ onBeforeUnmount(() => {
                   type="button"
                   class="icon-circle-btn"
                   title="生成公开分享码"
+                  :disabled="sharingClips[item.id]"
                   @click="shareClip(item)"
                 >
-                  <UiIcon name="qr" :size="13.5" />
+                  <UiIcon
+                    :name="sharingClips[item.id] ? 'spinner' : 'qr'"
+                    :size="13.5"
+                    :class="{ 'spin-anim': sharingClips[item.id] }"
+                  />
                 </button>
                 <button
                   type="button"
                   class="icon-circle-btn"
                   :class="{ 'is-pinned-btn': item.pinned }"
-                  title="置顶"
+                  title="置顶 / 取消置顶"
                   @click="togglePin(item)"
                 >
                   <UiIcon name="pin" :size="13.5" />
                 </button>
-                <MorphDeleteBtn title="删除此条文本" @confirm="removeClip(item)" />
+                <MorphDeleteBtn
+                  title="删除此条文本"
+                  :busy="Boolean(deletingClips[item.id])"
+                  @confirm="removeClip(item)"
+                />
               </div>
             </header>
 
@@ -438,32 +631,63 @@ onBeforeUnmount(() => {
             </button>
           </template>
 
-          <!-- FILE / IMAGE ITEM (Core Private Transfer + Per-File Silo & Google Drive Controls) -->
+          <!-- FILE / IMAGE ITEM -->
           <template v-else>
             <div class="file-main-row">
-              <!-- Thumbnail / Icon -->
-              <div
-                v-if="item.kind === 'image'"
-                class="file-thumb-box"
-                title="点击查看原图"
-                @click="lightboxClip = item"
-              >
-                <img :src="`/api/clips/${item.id}/raw`" :alt="item.fileName" loading="lazy" />
-              </div>
-              <div v-else class="file-ext-box mono">
-                {{ (item.fileName?.split('.').pop() || 'FILE').slice(0, 4).toUpperCase() }}
-              </div>
-
-              <!-- File Metadata -->
-              <div class="file-info">
-                <div class="file-title-line">
-                  <span v-if="item.pinned" class="tag-pill is-pin">置顶</span>
-                  <span class="file-name">{{ item.fileName }}</span>
+              <div class="file-lead">
+                <div
+                  v-if="item.kind === 'image'"
+                  class="file-thumb-box"
+                  title="点击查看原图"
+                  @click="lightboxClip = item"
+                >
+                  <img :src="`/api/clips/${item.id}/raw`" :alt="item.fileName" loading="lazy" />
                 </div>
-                <div class="file-meta mono">
-                  <span>私密互传</span>
-                  <span>· {{ formatBytes(item.size) }}</span>
-                  <span>· {{ formatTimeShort(item.createdAt) }}</span>
+                <div v-else class="file-ext-box mono">
+                  {{ (item.fileName?.split('.').pop() || 'FILE').slice(0, 4).toUpperCase() }}
+                </div>
+
+                <!-- File Metadata + Inline Click-to-Rename -->
+                <div class="file-info">
+                  <div class="file-title-line">
+                    <span v-if="item.pinned" class="tag-pill is-pin">置顶</span>
+                    <form
+                      v-if="editingClipId === item.id"
+                      class="inline-rename-form"
+                      @submit.prevent="commitInlineRename(item)"
+                    >
+                      <input
+                        v-model="editingNameDraft"
+                        :data-rename-id="item.id"
+                        class="inline-rename-input mono"
+                        :disabled="renamingClipBusy"
+                        @blur="commitInlineRename(item)"
+                      />
+                      <UiIcon v-if="renamingClipBusy" name="spinner" :size="12.5" class="spin-anim" />
+                    </form>
+                    <template v-else>
+                      <span
+                        class="file-name"
+                        title="点击修改文件名（转存图床或 Drive 前可改成语义名）"
+                        @click="startInlineRename(item)"
+                      >
+                        {{ item.fileName }}
+                      </span>
+                      <button
+                        type="button"
+                        class="inline-edit-trigger"
+                        title="修改文件名"
+                        @click="startInlineRename(item)"
+                      >
+                        <UiIcon name="edit" :size="12" />
+                      </button>
+                    </template>
+                  </div>
+                  <div class="file-meta mono">
+                    <span>{{ item.storage === 'gdrive' ? 'Drive 直传' : item.storage === 'silo' ? 'Silo 图床' : '私密互传' }}</span>
+                    <span>· {{ formatBytes(item.size) }}</span>
+                    <span>· {{ formatTimeShort(item.createdAt) }}</span>
+                  </div>
                 </div>
               </div>
 
@@ -485,7 +709,7 @@ onBeforeUnmount(() => {
                   type="button"
                   class="icon-circle-btn"
                   :title="inlinePreviewIds[item.id] ? '关闭预览' : '内联预览'"
-                  @click="inlinePreviewIds[item.id] = !inlinePreviewIds[item.id]"
+                  @click="toggleInlinePreview(item)"
                 >
                   <UiIcon name="eye" :size="14" />
                 </button>
@@ -503,22 +727,31 @@ onBeforeUnmount(() => {
                   type="button"
                   class="icon-circle-btn"
                   title="生成公开分享短链与二维码"
+                  :disabled="sharingClips[item.id]"
                   @click="shareClip(item)"
                 >
-                  <UiIcon name="qr" :size="13.5" />
+                  <UiIcon
+                    :name="sharingClips[item.id] ? 'spinner' : 'qr'"
+                    :size="13.5"
+                    :class="{ 'spin-anim': sharingClips[item.id] }"
+                  />
                 </button>
 
                 <button
                   type="button"
                   class="icon-circle-btn"
                   :class="{ 'is-pinned-btn': item.pinned }"
-                  title="置顶"
+                  title="置顶 / 取消置顶"
                   @click="togglePin(item)"
                 >
                   <UiIcon name="pin" :size="13.5" />
                 </button>
 
-                <MorphDeleteBtn title="删除此文件" @confirm="removeClip(item)" />
+                <MorphDeleteBtn
+                  title="删除此文件"
+                  :busy="Boolean(deletingClips[item.id])"
+                  @confirm="removeClip(item)"
+                />
               </div>
             </div>
 
@@ -530,6 +763,7 @@ onBeforeUnmount(() => {
                 preload="metadata"
                 :src="`/api/clips/${item.id}/raw`"
                 class="inline-video"
+                @play="store.pauseAudio()"
               />
               <audio
                 v-else-if="(item.mimeType || '').startsWith('audio/')"
@@ -537,6 +771,7 @@ onBeforeUnmount(() => {
                 preload="metadata"
                 :src="`/api/clips/${item.id}/raw`"
                 class="inline-audio"
+                @play="store.pauseAudio()"
               />
               <iframe
                 v-else
@@ -548,7 +783,6 @@ onBeforeUnmount(() => {
 
             <!-- PER-FILE DESTINATION ROUTING BAR: Silo Image-Host Link & Google Drive Folder Select -->
             <footer class="file-dest-bar">
-              <!-- Silo Image Host Switch / Copy Links -->
               <div v-if="store.status.value?.siloEnabled" class="dest-silo-group">
                 <template v-if="item.publicUrl">
                   <span class="silo-ready-badge">
@@ -570,12 +804,16 @@ onBeforeUnmount(() => {
                   :disabled="promotingSilo[item.id]"
                   @click="onPromoteToSilo(item)"
                 >
-                  <UiIcon name="link" :size="13.5" />
-                  <span>{{ promotingSilo[item.id] ? '正在转存图床…' : '存图床拿外链' }}</span>
+                  <UiIcon
+                    :name="promotingSilo[item.id] ? 'spinner' : 'link'"
+                    :size="13.5"
+                    :class="{ 'spin-anim': promotingSilo[item.id] }"
+                  />
+                  <span>{{ promotingSilo[item.id] ? '正在存入图床…' : '存图床拿外链' }}</span>
                 </button>
               </div>
 
-              <!-- Per-File Google Drive Folder Dropdown -->
+              <!-- Per-File Google Drive Folder Dropdown (with built-in spinner!) -->
               <DriveFolderSelect
                 v-if="store.status.value?.gdriveEnabled"
                 mode="file"
@@ -591,7 +829,7 @@ onBeforeUnmount(() => {
 
     <!-- Image Lightbox -->
     <Teleport to="body">
-      <Transition name="lb-fade">
+      <Transition name="lens-modal">
         <div v-if="lightboxClip" class="lb-backdrop" @click.self="lightboxClip = null">
           <div class="liquid-chrome lb-panel">
             <img :src="`/api/clips/${lightboxClip.id}/raw`" :alt="lightboxClip.fileName" />
@@ -630,6 +868,10 @@ onBeforeUnmount(() => {
   gap: 14px;
 }
 
+.hub-head-acts {
+  flex-wrap: wrap;
+}
+
 .filter-strip {
   display: inline-flex;
   padding: 2.5px;
@@ -656,6 +898,47 @@ onBeforeUnmount(() => {
   color: var(--ink-1);
   font-weight: 640;
   box-shadow: var(--shadow-pill);
+}
+
+.clr-pill {
+  height: 30px;
+  padding: 0 10px;
+  font-size: 0.75rem;
+  color: var(--ink-2);
+}
+
+.clr-armed {
+  display: inline-flex;
+  align-items: center;
+  height: 30px;
+  padding: 2px;
+  border-radius: 9px;
+  background: var(--danger-solid);
+  gap: 2px;
+}
+
+.clr-yes {
+  height: 100%;
+  border: 0;
+  border-radius: 7px;
+  padding: 0 9px;
+  background: transparent;
+  color: #fff;
+  font-size: 0.74rem;
+  font-weight: 640;
+  cursor: pointer;
+}
+
+.clr-no {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.2);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
 }
 
 /* Focal Paste & Drop Dock */
@@ -716,6 +999,7 @@ onBeforeUnmount(() => {
   font-size: 0.88rem;
   font-weight: 640;
   color: var(--ink-1);
+  pointer-events: none;
 }
 
 .paste-bar {
@@ -737,11 +1021,14 @@ onBeforeUnmount(() => {
   background: var(--emerald-fg);
 }
 
-/* Upload Progress */
+/* Smooth Upload Progress Queue */
 .upload-queue {
   display: flex;
   flex-direction: column;
   gap: 8px;
+}
+.upload-queue:empty {
+  display: none;
 }
 
 .up-row {
@@ -749,11 +1036,19 @@ onBeforeUnmount(() => {
   border-radius: 13px;
 }
 
+.up-row.is-error {
+  border-color: rgba(220, 38, 38, 0.35);
+}
+
 .up-top {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   margin-bottom: 7px;
+}
+
+.up-spin {
+  color: var(--ink-2);
 }
 
 .up-name {
@@ -771,13 +1066,17 @@ onBeforeUnmount(() => {
   color: var(--ink-3);
 }
 
+.up-stat.is-err-txt {
+  color: var(--danger-fg);
+}
+
 .up-cancel {
   width: 25px;
   height: 25px;
 }
 
 .up-bar {
-  height: 4px;
+  height: 4.5px;
   border-radius: 999px;
   background: var(--surface-recessed-hover);
   overflow: hidden;
@@ -786,7 +1085,24 @@ onBeforeUnmount(() => {
 .up-fill {
   height: 100%;
   background: var(--cta-bg);
-  transition: width 0.2s linear;
+  border-radius: 999px;
+  transition: width 0.16s ease-out;
+}
+
+.up-fill.is-err-fill {
+  background: var(--danger-solid);
+}
+
+.up-fold-enter-active,
+.up-fold-leave-active {
+  transition:
+    opacity 0.2s ease,
+    transform 0.26s var(--ease-spring);
+}
+.up-fold-enter-from,
+.up-fold-leave-to {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.98);
 }
 
 .empty-state {
@@ -835,6 +1151,7 @@ onBeforeUnmount(() => {
   border-radius: 5px;
   background: var(--surface-recessed);
   color: var(--ink-2);
+  flex-shrink: 0;
 }
 
 .tag-pill.is-pin {
@@ -886,16 +1203,25 @@ onBeforeUnmount(() => {
   cursor: pointer;
 }
 
-/* File / Image Card Layout */
+/* File / Image Card Layout (Mobile-Safe Two-Tier) */
 .file-main-row {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: 13px;
 }
 
+.file-lead {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  flex: 1;
+}
+
 .file-thumb-box {
-  width: 58px;
-  height: 58px;
+  width: 56px;
+  height: 56px;
   border-radius: 10px;
   overflow: hidden;
   background: var(--surface-recessed);
@@ -933,7 +1259,8 @@ onBeforeUnmount(() => {
 .file-title-line {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
+  min-width: 0;
 }
 
 .file-name {
@@ -943,6 +1270,49 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+}
+.file-name:hover {
+  text-decoration: underline;
+  text-decoration-color: var(--border-strong);
+  text-underline-offset: 3px;
+}
+
+.inline-edit-trigger {
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  padding: 2px;
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+  opacity: 0.55;
+  flex-shrink: 0;
+}
+.inline-edit-trigger:hover {
+  opacity: 1;
+  color: var(--ink-1);
+}
+
+.inline-rename-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+  min-width: 0;
+}
+
+.inline-rename-input {
+  width: 100%;
+  max-width: 260px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-pill);
+  color: var(--ink-1);
+  font-size: 0.82rem;
+  outline: none;
 }
 
 .file-meta {
@@ -1024,9 +1394,21 @@ onBeforeUnmount(() => {
   border-radius: 7px;
 }
 
-@media (max-width: 680px) {
+@media (max-width: 720px) {
   .file-main-row {
-    flex-wrap: wrap;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .file-lead {
+    width: 100%;
+  }
+  .file-name {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    word-break: break-word;
   }
   .file-quick-tools {
     width: 100%;
@@ -1103,18 +1485,12 @@ onBeforeUnmount(() => {
 .stream-card-leave-active {
   transition: all 0.26s var(--ease-spring);
 }
+.stream-card-move {
+  transition: transform 0.3s var(--ease-spring);
+}
 .stream-card-enter-from,
 .stream-card-leave-to {
   opacity: 0;
   transform: translateY(-8px);
-}
-
-.lb-fade-enter-active,
-.lb-fade-leave-active {
-  transition: opacity 0.2s ease;
-}
-.lb-fade-enter-from,
-.lb-fade-leave-to {
-  opacity: 0;
 }
 </style>

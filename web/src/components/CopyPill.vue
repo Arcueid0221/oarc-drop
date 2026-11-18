@@ -68,7 +68,7 @@ async function handleCopy() {
   height: 32px;
   padding: 0 12px;
   border-radius: 999px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--border-hairline);
   background: var(--surface-card);
   color: var(--ink-1);
   font-size: 0.79rem;

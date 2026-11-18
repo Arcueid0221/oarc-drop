@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import {
   formatBytes,
   formatTimeShort,
@@ -10,11 +11,18 @@ import MorphDeleteBtn from './MorphDeleteBtn.vue'
 import UiIcon from './UiIcon.vue'
 
 const store = useDropStore()
+const revokingMap = ref<Record<string, boolean>>({})
 
 async function revokeShare(code: string) {
-  const res = await fetch(`/api/shares/${code}`, { method: 'DELETE' })
-  if (res.ok) {
-    store.shares.value = store.shares.value.filter((s) => s.code !== code)
+  if (revokingMap.value[code]) return
+  revokingMap.value[code] = true
+  try {
+    const res = await fetch(`/api/shares/${code}`, { method: 'DELETE' })
+    if (res.ok) {
+      store.shares.value = store.shares.value.filter((s) => s.code !== code)
+    }
+  } finally {
+    revokingMap.value[code] = false
   }
 }
 
@@ -63,8 +71,15 @@ function storageLabel(st: string): string {
             <button
               type="button"
               class="icon-circle-btn"
-              title="查看二维码"
-              @click="store.openQrModal(sh.fileName, shareFullUrl(sh.code), '免登录扫码取件')"
+              title="查看二维码 / 修改提取码与有效期"
+              @click="
+                store.openQrModal(
+                  sh.fileName,
+                  shareFullUrl(sh.code),
+                  '免登录扫码取件 · 可修改权限设置',
+                  sh.code,
+                )
+              "
             >
               <UiIcon name="qr" :size="14" />
             </button>
@@ -80,6 +95,8 @@ function storageLabel(st: string): string {
             <MorphDeleteBtn
               title="作废外链"
               confirm-label="确认作废"
+              busy-label="作废中…"
+              :busy="Boolean(revokingMap[sh.code])"
               @confirm="revokeShare(sh.code)"
             />
           </div>
@@ -106,10 +123,14 @@ function storageLabel(st: string): string {
 .sh-card {
   padding: 13px 16px;
   display: flex;
-  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+}
+
+.sh-info {
+  min-width: 0;
+  flex: 1;
 }
 
 .sh-top-line {
@@ -143,7 +164,7 @@ function storageLabel(st: string): string {
 .sh-name {
   font-size: 0.88rem;
   font-weight: 630;
-  word-break: break-all;
+  word-break: break-word;
 }
 
 .sh-spec {
@@ -159,6 +180,21 @@ function storageLabel(st: string): string {
   display: flex;
   align-items: center;
   gap: 6px;
+  flex-shrink: 0;
+}
+
+@media (max-width: 680px) {
+  .sh-card {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .sh-actions {
+    width: 100%;
+    padding-top: 8px;
+    border-top: 1px solid var(--border-hairline);
+    justify-content: flex-end;
+  }
 }
 
 .row-fade-enter-active,
