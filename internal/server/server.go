@@ -84,6 +84,7 @@ type Server struct {
 	mediaFetched time.Time
 	mediaItems   []MediaItem
 	lrcMap       map[string]string // audio key -> lrc key
+	coverMap     map[string]string // audio key -> cover key in music/covers/tracks/
 
 	trackMu    sync.RWMutex
 	trackCache map[string]cachedTrackMeta
@@ -109,6 +110,7 @@ func New(cfg Config, st *store.Store) *Server {
 		mux:        http.NewServeMux(),
 		sseClients: make(map[chan string]struct{}),
 		lrcMap:     make(map[string]string),
+		coverMap:   make(map[string]string),
 		trackCache: make(map[string]cachedTrackMeta),
 	}
 	s.registerRoutes()
@@ -962,9 +964,18 @@ func (s *Server) ensureMediaIndex(ctx context.Context, force bool) ([]MediaItem,
 	thumbSet := make(map[string]struct{})
 	lrcByStem := make(map[string]string)
 	lrcByBaseStem := make(map[string]string)
+	coverByBaseStem := make(map[string]string)
 	for _, o := range objs {
 		if strings.Contains(o.Key, "/thumbs/") || strings.HasPrefix(o.Key, "thumbs/") {
 			thumbSet[o.Key] = struct{}{}
+			continue
+		}
+		if strings.HasPrefix(o.Key, "music/covers/tracks/") {
+			base := path.Base(o.Key)
+			baseStem := strings.TrimSuffix(base, path.Ext(base))
+			if baseStem != "" {
+				coverByBaseStem[baseStem] = o.Key
+			}
 			continue
 		}
 		if strings.EqualFold(path.Ext(o.Key), ".lrc") {
@@ -979,12 +990,13 @@ func (s *Server) ensureMediaIndex(ctx context.Context, force bool) ([]MediaItem,
 
 	items := make([]MediaItem, 0, len(objs))
 	newLrcMap := make(map[string]string)
+	newCoverMap := make(map[string]string)
 	for _, o := range objs {
 		if o.Size == 0 || strings.HasSuffix(o.Key, "/") {
 			continue
 		}
-		// Skip Aurora generated thumbnail duplicates from appearing as standalone photos
-		if strings.Contains(o.Key, "/thumbs/") || strings.HasPrefix(o.Key, "thumbs/") {
+		// Skip Aurora generated thumbnail duplicates & per-track sidecar covers from standalone image list
+		if strings.Contains(o.Key, "/thumbs/") || strings.HasPrefix(o.Key, "thumbs/") || strings.HasPrefix(o.Key, "music/covers/tracks/") {
 			continue
 		}
 		ext := strings.ToLower(strings.TrimPrefix(path.Ext(o.Key), "."))
@@ -1025,6 +1037,10 @@ func (s *Server) ensureMediaIndex(ctx context.Context, force bool) ([]MediaItem,
 				item.LyricsKey = lk
 				newLrcMap[o.Key] = lk
 			}
+			if ck, ok := coverByBaseStem[baseStem]; ok {
+				item.ThumbURL = "/api/media/stream?key=" + url.QueryEscape(ck)
+				newCoverMap[o.Key] = ck
+			}
 		}
 		items = append(items, item)
 	}
@@ -1036,6 +1052,7 @@ func (s *Server) ensureMediaIndex(ctx context.Context, force bool) ([]MediaItem,
 	s.mediaMu.Lock()
 	s.mediaItems = items
 	s.lrcMap = newLrcMap
+	s.coverMap = newCoverMap
 	s.mediaFetched = time.Now()
 	s.mediaMu.Unlock()
 	return items, nil
@@ -1130,6 +1147,12 @@ func (s *Server) handleTrackMeta(w http.ResponseWriter, r *http.Request) {
 		coverURL := ""
 		if cached.Meta.HasCover {
 			coverURL = "/api/media/cover?key=" + url.QueryEscape(key)
+		} else {
+			s.mediaMu.RLock()
+			if ck := s.coverMap[key]; ck != "" {
+				coverURL = "/api/media/stream?key=" + url.QueryEscape(ck)
+			}
+			s.mediaMu.RUnlock()
 		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"meta":     cached.Meta,
@@ -1180,6 +1203,12 @@ func (s *Server) handleTrackMeta(w http.ResponseWriter, r *http.Request) {
 	coverURL := ""
 	if meta.HasCover {
 		coverURL = "/api/media/cover?key=" + url.QueryEscape(key)
+	} else {
+		s.mediaMu.RLock()
+		if ck := s.coverMap[key]; ck != "" {
+			coverURL = "/api/media/stream?key=" + url.QueryEscape(ck)
+		}
+		s.mediaMu.RUnlock()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"meta":     meta,

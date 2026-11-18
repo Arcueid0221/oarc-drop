@@ -166,9 +166,17 @@ func (s *Server) handleListSiloObjects(w http.ResponseWriter, r *http.Request) {
 	}
 	includeThumbs := r.URL.Query().Get("includeThumbs") == "1"
 	thumbSet := make(map[string]struct{})
+	coverByBaseStem := make(map[string]string)
 	for _, o := range objs {
 		if strings.Contains(o.Key, "/thumbs/") || strings.HasPrefix(o.Key, "thumbs/") {
 			thumbSet[o.Key] = struct{}{}
+		}
+		if strings.HasPrefix(o.Key, "music/covers/tracks/") {
+			base := path.Base(o.Key)
+			stem := strings.TrimSuffix(base, path.Ext(base))
+			if stem != "" {
+				coverByBaseStem[stem] = o.Key
+			}
 		}
 	}
 
@@ -196,6 +204,11 @@ func (s *Server) handleListSiloObjects(w http.ResponseWriter, r *http.Request) {
 				thumbURL = "/api/media/stream?key=" + url.QueryEscape(candThumb)
 			} else {
 				thumbURL = streamURL
+			}
+		} else if kind == "audio" {
+			baseStem := strings.TrimSuffix(name, path.Ext(name))
+			if ck, ok := coverByBaseStem[baseStem]; ok {
+				thumbURL = "/api/media/stream?key=" + url.QueryEscape(ck)
 			}
 		}
 		folderCounts[dir]++

@@ -44,6 +44,10 @@
 
   --cta-bg: #0f172a;
   --cta-fg: #ffffff;
+  --accent: #0071e3;
+  --accent-soft: rgba(0, 113, 227, 0.11);
+  --accent-border: rgba(0, 113, 227, 0.28);
+  --surface-hover: rgba(15, 23, 42, 0.065);
   --emerald-bg: rgba(16, 185, 129, 0.13);
   --emerald-fg: #059669;
   --emerald-border: rgba(16, 185, 129, 0.28);
@@ -93,6 +97,10 @@
 
   --cta-bg: #f4f6fa;
   --cta-fg: #0a0b0e;
+  --accent: #38bdf8;
+  --accent-soft: rgba(56, 189, 248, 0.16);
+  --accent-border: rgba(56, 189, 248, 0.34);
+  --surface-hover: rgba(255, 255, 255, 0.09);
   --emerald-bg: rgba(16, 185, 129, 0.16);
   --emerald-fg: #34d399;
   --emerald-border: rgba(52, 211, 153, 0.28);
@@ -185,9 +193,10 @@ button, input, textarea {
   min-height: 68px;
   padding: 14px 28px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
+  gap: 12px 16px;
   background: var(--bg-window);
   -webkit-backdrop-filter: blur(24px) saturate(180%);
   backdrop-filter: blur(24px) saturate(180%);
@@ -195,7 +204,8 @@ button, input, textarea {
 }
 
 .pane-title-wrap {
-  min-width: 0;
+  min-width: 200px;
+  flex: 1;
 }
 
 .pane-title {

@@ -156,13 +156,14 @@ export async function copyImagePixels(srcUrl: string) {
 }
 
 export function parseTrackDisplayName(track: MediaItem, catalog?: Record<string, CatalogTrackInfo>) {
+  const fallbackCover = track.thumbUrl || ''
   const c = catalog?.[track.key]
   if (c && c.title) {
     return {
       title: c.title,
       artist: c.artist || '',
       album: c.album || '',
-      coverUrl: c.coverUrl || '',
+      coverUrl: fallbackCover || c.coverUrl || '',
     }
   }
   const stem = track.name.replace(/\.[^.]+$/, '')
@@ -172,10 +173,10 @@ export function parseTrackDisplayName(track: MediaItem, catalog?: Record<string,
       artist: stem.slice(0, sepIdx).trim(),
       title: stem.slice(sepIdx + 3).trim(),
       album: '',
-      coverUrl: '',
+      coverUrl: fallbackCover,
     }
   }
-  return { title: stem, artist: track.folder, album: '', coverUrl: '' }
+  return { title: stem, artist: track.folder, album: '', coverUrl: fallbackCover }
 }
 
 export function parseLrc(raw: string): LrcLine[] {

@@ -313,7 +313,7 @@ onBeforeUnmount(() => {
       </header>
 
       <!-- Right Equal-Height Scrollable Main Canvas -->
-      <main class="macos-canvas">
+      <main class="macos-canvas" :class="{ 'is-locked-pane': activeTab === 'music' }">
         <Transition name="pane-fade" mode="out-in">
           <HubView v-if="activeTab === 'hub'" key="hub" />
           <VaultView v-else-if="activeTab === 'vault'" key="vault" />
@@ -673,6 +673,12 @@ onBeforeUnmount(() => {
   overflow-y: auto;
   overflow-x: hidden;
   -webkit-overflow-scrolling: touch;
+}
+
+.macos-canvas.is-locked-pane {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 /* Hide mobile chrome on Desktop */

@@ -85,7 +85,13 @@ onMounted(() => {
 const filteredSilo = computed(() => {
   const q = search.value.trim().toLowerCase()
   return store.siloObjects.value.filter((it) => {
-    if (activeFolder.value && it.folder !== activeFolder.value) return false
+    if (activeFolder.value) {
+      if (it.folder !== activeFolder.value) return false
+    } else if (!q) {
+      // In "全部" overview, hide sidecar track covers & .lrc files so each song isn't listed 3 times;
+      // clicking `music/covers/tracks` or `music/lyrics` folder chip shows them directly!
+      if (it.folder === 'music/covers/tracks' || it.folder === 'music/lyrics') return false
+    }
     if (q && !it.key.toLowerCase().includes(q)) return false
     return true
   })
@@ -343,8 +349,8 @@ function openPreviewSilo(item: VaultObject) {
             @click="openPreviewSilo(obj)"
           >
             <img
-              v-if="obj.kind === 'image'"
-              :src="obj.thumbUrl || obj.streamUrl"
+              v-if="obj.thumbUrl"
+              :src="obj.thumbUrl"
               :alt="obj.name"
               loading="lazy"
             />
@@ -352,6 +358,10 @@ function openPreviewSilo(item: VaultObject) {
               <UiIcon :name="obj.kind === 'audio' ? 'disc' : 'file'" :size="30" />
               <span class="ext-tag mono">{{ obj.ext || 'BIN' }}</span>
             </div>
+            <span v-if="obj.kind === 'audio'" class="tile-audio-badge mono">
+              <UiIcon name="play" :size="10" />
+              <span>{{ obj.ext }}</span>
+            </span>
 
             <div class="tile-scrim" @click.stop>
               <div class="tile-info" @click="openPreviewSilo(obj)">
@@ -406,8 +416,8 @@ function openPreviewSilo(item: VaultObject) {
           <div v-for="obj in filteredSilo" :key="obj.key" class="glass-box file-row">
             <div class="fr-main" @click="openPreviewSilo(obj)">
               <img
-                v-if="obj.kind === 'image'"
-                :src="obj.thumbUrl || obj.streamUrl"
+                v-if="obj.thumbUrl"
+                :src="obj.thumbUrl"
                 class="fr-thumb"
                 alt=""
                 loading="lazy"
@@ -722,6 +732,22 @@ function openPreviewSilo(item: VaultObject) {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+.tile-audio-badge {
+  position: absolute;
+  top: 9px;
+  right: 9px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.72);
+  backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 0.66rem;
+  font-weight: 660;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .non-img-tile {
