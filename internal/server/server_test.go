@@ -82,13 +82,45 @@ func newFakeSiloTransport(t *testing.T, bucket string, initial map[string]memObj
 		}
 
 		switch r.Method {
+		case http.MethodHead:
+			mu.RLock()
+			o, ok := objs[key]
+			mu.RUnlock()
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(o.data)))
+			w.WriteHeader(http.StatusOK)
+
 		case http.MethodPut:
+			if cpSrc := r.Header.Get("X-Amz-Copy-Source"); cpSrc != "" {
+				decodedSrc, _ := url.PathUnescape(strings.TrimPrefix(cpSrc, "/"+bucket+"/"))
+				mu.Lock()
+				srcObj, ok := objs[decodedSrc]
+				if !ok {
+					mu.Unlock()
+					http.NotFound(w, r)
+					return
+				}
+				objs[key] = srcObj
+				mu.Unlock()
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte("<CopyObjectResult><ETag>\"copy\"</ETag></CopyObjectResult>"))
+				return
+			}
 			b, _ := io.ReadAll(r.Body)
 			mu.Lock()
 			objs[key] = memObj{data: b, contentType: r.Header.Get("Content-Type")}
 			mu.Unlock()
 			w.Header().Set("ETag", "\"put-etag\"")
 			w.WriteHeader(http.StatusOK)
+
+		case http.MethodDelete:
+			mu.Lock()
+			delete(objs, key)
+			mu.Unlock()
+			w.WriteHeader(http.StatusNoContent)
 
 		case http.MethodGet:
 			mu.RLock()
@@ -331,5 +363,52 @@ fi
 	gotBytes, _ := io.ReadAll(dlResp.Body)
 	if !bytes.Equal(gotBytes, payload) {
 		t.Fatalf("downloaded bytes mismatch: got %d want %d", len(gotBytes), len(payload))
+	}
+
+	// 7. Image-Host Paste -> Silo (clean naming + collision -2 + direct private clip stream)
+	uploadToImgHost := func(fname string) store.ClipItem {
+		var b bytes.Buffer
+		w := multipart.NewWriter(&b)
+		_ = w.WriteField("target", "silo")
+		_ = w.WriteField("prefix", "images/")
+		part, _ := w.CreateFormFile("file", fname)
+		_, _ = part.Write(rawPNG)
+		w.Close()
+		resp := doReq(http.MethodPost, "/api/clips/file", &b, w.FormDataContentType(), true, nil)
+		if resp.StatusCode != http.StatusCreated {
+			t.Fatalf("expected 201 for imghost paste, got %d", resp.StatusCode)
+		}
+		var item store.ClipItem
+		_ = json.NewDecoder(resp.Body).Decode(&item)
+		return item
+	}
+	img1 := uploadToImgHost("arch.png")
+	if img1.StorageKey != "images/arch.png" || img1.PublicURL != "https://img.arcueidblog.top/aurora/images/arch.png" {
+		t.Fatalf("unexpected clean imghost key/url: %+v", img1)
+	}
+	img2 := uploadToImgHost("arch.png")
+	if img2.StorageKey != "images/arch-2.png" {
+		t.Fatalf("expected collision suffix arch-2.png, got %s", img2.StorageKey)
+	}
+
+	// 8. Silo Vault protection lock + rename + delete
+	delProtected := doReq(http.MethodDelete, "/api/silo/object?key=photos/pic1.jpg", nil, "", true, nil)
+	if delProtected.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 deleting protected blog photo without force, got %d", delProtected.StatusCode)
+	}
+	renRes := doReq(http.MethodPost, "/api/silo/rename", strings.NewReader(`{"key":"images/arch-2.png","newName":"diagram.png"}`), "application/json", true, nil)
+	if renRes.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 renaming images/arch-2.png, got %d", renRes.StatusCode)
+	}
+	delUnprotected := doReq(http.MethodDelete, "/api/silo/object?key=images/diagram.png", nil, "", true, nil)
+	if delUnprotected.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 deleting images/diagram.png, got %d", delUnprotected.StatusCode)
+	}
+
+	// 9. Zero-dependency QR Code SVG endpoint
+	qrResp := doReq(http.MethodGet, "/api/qr?text="+url.QueryEscape("https://drop.arcueidblog.top/s/test123"), nil, "", true, nil)
+	qrSvg, _ := io.ReadAll(qrResp.Body)
+	if qrResp.StatusCode != http.StatusOK || !bytes.Contains(qrSvg, []byte("<svg")) {
+		t.Fatalf("unexpected qr response: status=%d len=%d", qrResp.StatusCode, len(qrSvg))
 	}
 }

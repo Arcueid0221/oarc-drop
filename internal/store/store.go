@@ -22,17 +22,20 @@ var (
 )
 
 type ClipItem struct {
-	ID        string    `json:"id"`
-	Kind      string    `json:"kind"` // "text" | "image" | "file"
-	Text      string    `json:"text,omitempty"`
-	FileName  string    `json:"fileName,omitempty"`
-	MimeType  string    `json:"mimeType,omitempty"`
-	Size      int64     `json:"size,omitempty"`
-	SHA256    string    `json:"sha256,omitempty"`
-	LocalRel  string    `json:"-"` // relative to DataDir
-	ShareCode string    `json:"shareCode,omitempty"`
-	Pinned    bool      `json:"pinned"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID         string    `json:"id"`
+	Kind       string    `json:"kind"` // "text" | "image" | "file"
+	Text       string    `json:"text,omitempty"`
+	FileName   string    `json:"fileName,omitempty"`
+	MimeType   string    `json:"mimeType,omitempty"`
+	Size       int64     `json:"size,omitempty"`
+	SHA256     string    `json:"sha256,omitempty"`
+	Storage    string    `json:"storage,omitempty"`    // "local" | "silo" | "gdrive"
+	StorageKey string    `json:"storageKey,omitempty"` // S3 key or Drive rel path (omitted for local internal path)
+	PublicURL  string    `json:"publicUrl,omitempty"`  // Direct CDN URL when stored in Silo
+	LocalRel   string    `json:"-"`                    // relative to DataDir when Storage == "local"
+	ShareCode  string    `json:"shareCode,omitempty"`
+	Pinned     bool      `json:"pinned"`
+	CreatedAt  time.Time `json:"createdAt"`
 }
 
 type ShareItem struct {
@@ -68,6 +71,7 @@ type UploadSession struct {
 	PassSalt     string    `json:"passSalt,omitempty"`
 	PassHash     string    `json:"passHash,omitempty"`
 	AddToClip    bool      `json:"addToClip,omitempty"`
+	SkipShare    bool      `json:"skipShare,omitempty"`
 	CreatedAt    time.Time `json:"createdAt"`
 }
 
@@ -136,9 +140,12 @@ func (s *Store) load() error {
 	for _, dc := range ds.Clips {
 		if dc.ID != "" {
 			cp := dc.ClipItem
+			if cp.Storage == "" && cp.Kind != "text" {
+				cp.Storage = "local"
+			}
 			if dc.LocalRel != "" {
 				cp.LocalRel = dc.LocalRel
-			} else if cp.Kind != "text" && cp.FileName != "" {
+			} else if cp.Kind != "text" && cp.Storage == "local" && cp.FileName != "" {
 				cp.LocalRel = filepath.Join("clips", cp.ID+"_"+sanitizeFileName(cp.FileName))
 			}
 			s.clips[cp.ID] = &cp
@@ -273,29 +280,54 @@ func (s *Store) AddTextClip(text string) (*ClipItem, error) {
 }
 
 func (s *Store) AddFileClip(id string, kind string, fileName string, mimeType string, size int64, shaHex string, localRel string, shareCode string) (*ClipItem, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if id == "" {
-		id = randomID(10)
-	}
-	item := &ClipItem{
+	return s.AddStoredFileClip(ClipItem{
 		ID:        id,
 		Kind:      kind,
 		FileName:  fileName,
 		MimeType:  mimeType,
 		Size:      size,
 		SHA256:    shaHex,
+		Storage:   "local",
 		LocalRel:  localRel,
 		ShareCode: shareCode,
-		CreatedAt: time.Now().UTC(),
+	})
+}
+
+func (s *Store) AddStoredFileClip(item ClipItem) (*ClipItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if item.ID == "" {
+		item.ID = randomID(10)
 	}
-	s.clips[item.ID] = item
+	if item.Storage == "" {
+		item.Storage = "local"
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now().UTC()
+	}
+	stored := item
+	s.clips[stored.ID] = &stored
 	s.pruneClipsLocked()
 	if err := s.saveLocked(); err != nil {
 		return nil, err
 	}
-	cp := *item
+	cp := stored
 	return &cp, nil
+}
+
+func (s *Store) ListLocalFiles() []ClipItem {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]ClipItem, 0)
+	for _, c := range s.clips {
+		if c.Kind != "text" && (c.Storage == "" || c.Storage == "local") && c.LocalRel != "" {
+			out = append(out, *c)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out
 }
 
 func (s *Store) SetClipPinned(id string, pinned bool) (*ClipItem, error) {

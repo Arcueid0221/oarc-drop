@@ -28,8 +28,8 @@ function storageLabel(st: string): string {
   <div class="shares-page">
     <header class="pane-header">
       <div class="pane-title-wrap">
-        <h1 class="pane-title">分享管理</h1>
-        <p class="pane-subtitle">公开路径 `/s/短码` 支持免登录无损直下 · 到期或达上限自动清理</p>
+        <h1 class="pane-title">外链管理</h1>
+        <p class="pane-subtitle">集中管理你对外公开分享的 `/s/短码` · 支持扫码免登录取件与随时作废</p>
       </div>
 
       <div class="pane-actions">
@@ -63,6 +63,14 @@ function storageLabel(st: string): string {
 
           <div class="sh-actions">
             <CopyPill :text="shareFullUrl(sh.code)" label="复制链接" copied-label="已复制" />
+            <button
+              type="button"
+              class="icon-circle-btn"
+              title="查看取件二维码"
+              @click="store.openQrModal(sh.fileName, shareFullUrl(sh.code), '外部访客扫码免登录取件')"
+            >
+              <UiIcon name="qr" :size="14.5" />
+            </button>
             <a
               class="icon-circle-btn"
               :href="`/s/${sh.code}`"

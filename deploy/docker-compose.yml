@@ -23,6 +23,7 @@ services:
       SILO_DROP_PREFIX: "drop/"
       GDRIVE_REMOTE_DIR: "${GDRIVE_REMOTE_DIR:-}"
       RCLONE_CONFIG: "/etc/oarc-drop/rclone.conf"
+      AURORA_API_BASE: "http://backend:8080"
       REQUIRE_CF_ACCESS: "true"
       PUBLIC_BASE_URL: "https://drop.arcueidblog.top"
     volumes:

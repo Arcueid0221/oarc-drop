@@ -67,6 +67,7 @@ func main() {
 		GDriveRemoteDir: strings.TrimSpace(os.Getenv("GDRIVE_REMOTE_DIR")),
 		RcloneBin:       envOr("RCLONE_BIN", "rclone"),
 		RcloneConfig:    strings.TrimSpace(os.Getenv("RCLONE_CONFIG")),
+		AuroraAPIBase:   envOr("AURORA_API_BASE", "http://backend:8080"),
 		RequireCFAccess: strings.EqualFold(os.Getenv("REQUIRE_CF_ACCESS"), "true") || os.Getenv("REQUIRE_CF_ACCESS") == "1",
 		AdminToken:      strings.TrimSpace(os.Getenv("ADMIN_TOKEN")),
 		PublicBaseURL:   strings.TrimRight(os.Getenv("PUBLIC_BASE_URL"), "/"),

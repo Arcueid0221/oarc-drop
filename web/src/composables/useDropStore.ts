@@ -1,12 +1,18 @@
 import { computed, reactive, ref } from 'vue'
 import type {
+  CatalogPlaylist,
+  CatalogTrackInfo,
   ClipItem,
+  GDriveFile,
   LrcLine,
   MediaItem,
+  PlayMode,
+  QrModalPayload,
   ServerStatus,
   ShareItem,
   TrackMetadata,
   UploadTask,
+  VaultObject,
 } from '../types'
 
 const status = ref<ServerStatus | null>(null)
@@ -16,9 +22,21 @@ const mediaItems = ref<MediaItem[]>([])
 const mediaFolders = ref<string[]>([])
 const imageCount = ref(0)
 const audioCount = ref(0)
+
+// Full Vault State
+const siloObjects = ref<VaultObject[]>([])
+const siloFolders = ref<string[]>([])
+const gdriveFiles = ref<GDriveFile[]>([])
+
+// Blog Music Catalog State
+const playlists = ref<CatalogPlaylist[]>([])
+const catalogTracks = ref<Record<string, CatalogTrackInfo>>({})
+
 const uploads = ref<UploadTask[]>([])
 const toastText = ref('')
 let toastTimer: number | undefined
+
+const qrModal = ref<QrModalPayload | null>(null)
 
 // Persistent Liquid Glass Music Player State (survives tab switches)
 const currentTrack = ref<MediaItem | null>(null)
@@ -28,6 +46,13 @@ const currentLyrics = ref<LrcLine[]>([])
 const isPlaying = ref(false)
 const audioProgress = ref(0)
 const audioDuration = ref(0)
+const playMode = ref<PlayMode>(
+  (localStorage.getItem('oarc_play_mode') as PlayMode) || 'sequence',
+)
+const audioVolume = ref<number>(
+  Number(localStorage.getItem('oarc_volume') ?? '0.9') || 0.9,
+)
+const activeQueueKeys = ref<string[]>([])
 
 export function showToast(msg: string) {
   toastText.value = msg
@@ -60,6 +85,16 @@ export function shareFullUrl(code: string): string {
   return `${window.location.origin}/s/${code}`
 }
 
+export function formatMarkdownImage(name: string, url: string): string {
+  const alt = (name || 'image').replace(/\.[^.]+$/, '')
+  return `![${alt}](${url})`
+}
+
+export function formatHtmlImage(name: string, url: string): string {
+  const alt = (name || 'image').replace(/"/g, '&quot;')
+  return `<img src="${url}" alt="${alt}" loading="lazy" />`
+}
+
 export async function copyText(text: string, label = '已复制到剪贴板') {
   try {
     await navigator.clipboard.writeText(text)
@@ -73,6 +108,74 @@ export async function copyText(text: string, label = '已复制到剪贴板') {
     document.body.removeChild(ta)
     showToast(label)
   }
+}
+
+// Writes actual image pixels into OS clipboard (converts non-PNG via offscreen canvas so Safari/Chrome/WeChat paste works everywhere!)
+export async function copyImagePixels(srcUrl: string) {
+  if (!navigator.clipboard || typeof ClipboardItem === 'undefined') {
+    showToast('当前浏览器不支持直接写图片到剪贴板，请使用下载')
+    return
+  }
+  try {
+    const res = await fetch(srcUrl)
+    if (!res.ok) throw new Error('拉取原图失败')
+    const blob = await res.blob()
+    if (blob.type === 'image/png') {
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+      showToast('原图已写入系统剪贴板，可直接 ⌘V 粘贴')
+      return
+    }
+    // Convert JPEG/WebP to PNG blob for universal ClipboardItem compatibility
+    const bmpUrl = URL.createObjectURL(blob)
+    try {
+      const pngBlob = await new Promise<Blob>((resolve, reject) => {
+        const img = new Image()
+        img.onload = () => {
+          const cv = document.createElement('canvas')
+          cv.width = img.naturalWidth
+          cv.height = img.naturalHeight
+          const ctx = cv.getContext('2d')
+          if (!ctx) {
+            reject(new Error('canvas unavailable'))
+            return
+          }
+          ctx.drawImage(img, 0, 0)
+          cv.toBlob((b) => (b ? resolve(b) : reject(new Error('png encode failed'))), 'image/png')
+        }
+        img.onerror = () => reject(new Error('image decode failed'))
+        img.src = bmpUrl
+      })
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })])
+      showToast('图片已写入系统剪贴板，可直接粘贴到微信/文档')
+    } finally {
+      URL.revokeObjectURL(bmpUrl)
+    }
+  } catch {
+    showToast('复制图片受浏览器权限限制，请长按图片或点下载')
+  }
+}
+
+export function parseTrackDisplayName(track: MediaItem, catalog?: Record<string, CatalogTrackInfo>) {
+  const c = catalog?.[track.key]
+  if (c && c.title) {
+    return {
+      title: c.title,
+      artist: c.artist || '',
+      album: c.album || '',
+      coverUrl: c.coverUrl || '',
+    }
+  }
+  const stem = track.name.replace(/\.[^.]+$/, '')
+  const sepIdx = stem.indexOf(' - ')
+  if (sepIdx > 0) {
+    return {
+      artist: stem.slice(0, sepIdx).trim(),
+      title: stem.slice(sepIdx + 3).trim(),
+      album: '',
+      coverUrl: '',
+    }
+  }
+  return { title: stem, artist: track.folder, album: '', coverUrl: '' }
 }
 
 export function parseLrc(raw: string): LrcLine[] {
@@ -94,7 +197,6 @@ export function parseLrc(raw: string): LrcLine[] {
   return lines.sort((a, b) => a.time - b.time)
 }
 
-// Extract dominant vibrant hues from album cover to bleed into Liquid Glass ambient canvas
 export function applyAmbientFromCover(imgUrl: string) {
   if (!imgUrl) {
     resetAmbientColors()
@@ -130,7 +232,7 @@ export function applyAmbientFromCover(imgUrl: string) {
         document.documentElement.style.setProperty('--cover-rgb', `${c1.r}, ${c1.g}, ${c1.b}`)
       }
     } catch {
-      // keep existing ambient palette
+      // External cover without CORS keeps default ambient tint cleanly
     }
   }
   img.src = imgUrl
@@ -141,6 +243,38 @@ export function resetAmbientColors() {
 }
 
 export function useDropStore() {
+  function openQrModal(title: string, url: string, subtitle?: string) {
+    qrModal.value = { title, url, subtitle }
+  }
+
+  function closeQrModal() {
+    qrModal.value = null
+  }
+
+  function setPlayMode(mode: PlayMode) {
+    playMode.value = mode
+    localStorage.setItem('oarc_play_mode', mode)
+  }
+
+  function cyclePlayMode() {
+    const order: PlayMode[] = ['sequence', 'shuffle', 'one']
+    const next = order[(order.indexOf(playMode.value) + 1) % order.length]
+    setPlayMode(next)
+    const labels: Record<PlayMode, string> = {
+      sequence: '列表循环',
+      shuffle: '随机播放',
+      one: '单曲循环',
+    }
+    showToast(`已切换为：${labels[next]}`)
+  }
+
+  function setVolume(val: number) {
+    const clamped = Math.min(1, Math.max(0, val))
+    audioVolume.value = clamped
+    localStorage.setItem('oarc_volume', String(clamped))
+    window.dispatchEvent(new CustomEvent('oarc-audio-volume', { detail: clamped }))
+  }
+
   async function loadInitial() {
     const [stRes, clipRes, shareRes] = await Promise.all([
       fetch('/api/status'),
@@ -166,6 +300,29 @@ export function useDropStore() {
     mediaFolders.value = d.folders || []
     imageCount.value = d.imageCount || 0
     audioCount.value = d.audioCount || 0
+  }
+
+  async function loadSiloVault(includeThumbs = false) {
+    const res = await fetch(`/api/silo/objects?includeThumbs=${includeThumbs ? '1' : '0'}`)
+    if (!res.ok) return
+    const d = await res.json()
+    siloObjects.value = d.items || []
+    siloFolders.value = d.folders || []
+  }
+
+  async function loadGDriveFiles() {
+    const res = await fetch('/api/gdrive/files')
+    if (!res.ok) return
+    const d = await res.json()
+    gdriveFiles.value = d.items || []
+  }
+
+  async function loadMusicCatalog(refresh = false) {
+    const res = await fetch(`/api/music/catalog${refresh ? '?refresh=1' : ''}`)
+    if (!res.ok) return
+    const d = await res.json()
+    playlists.value = d.playlists || []
+    catalogTracks.value = d.tracks || {}
   }
 
   function connectSSE(): () => void {
@@ -196,6 +353,7 @@ export function useDropStore() {
     })
     es.addEventListener('media.refresh', () => {
       void loadMedia(true)
+      if (siloObjects.value.length > 0) void loadSiloVault(false)
     })
     return () => es.close()
   }
@@ -211,31 +369,60 @@ export function useDropStore() {
     if (!clips.value.some((c) => c.id === item.id)) {
       clips.value = [item, ...clips.value]
     }
-    showToast('已同步到剪贴板')
+    showToast('文本已同步至收发台')
+    return item
   }
 
-  async function sendQuickPasteFile(file: File) {
-    // If file > 20 MiB, automatically route through the 20 MiB chunked uploader with addToClip=true!
+  async function sendQuickPasteFile(
+    file: File,
+    opts?: {
+      target?: 'local' | 'silo'
+      prefix?: string
+      autoCopyFormat?: 'md' | 'url' | 'none'
+    },
+  ) {
+    const target = opts?.target || 'local'
+    const prefix = opts?.prefix || (target === 'silo' ? 'images/' : '')
+    const autoCopy = opts?.autoCopyFormat || (target === 'silo' ? 'md' : 'none')
+
     if (file.size > 20 * 1024 * 1024) {
       await uploadChunkedFile(file, {
-        target: 'local',
-        ttlHours: 168,
+        target,
+        siloPrefix: prefix || 'drop/',
+        ttlHours: 0,
         maxDownloads: 0,
         passcode: '',
-        siloPrefix: '',
         addToClip: true,
+        skipShare: true,
+        autoCopyFormat: autoCopy,
       })
       return
     }
     const fd = new FormData()
     fd.append('file', file)
+    fd.append('target', target)
+    if (prefix) fd.append('prefix', prefix)
     const res = await fetch('/api/clips/file', { method: 'POST', body: fd })
-    if (!res.ok) throw new Error('粘贴上传失败')
+    if (!res.ok) throw new Error('上传失败')
     const item: ClipItem = await res.json()
     if (!clips.value.some((c) => c.id === item.id)) {
       clips.value = [item, ...clips.value]
     }
-    showToast(`无损已同步：${file.name}`)
+    if (target === 'silo' && item.publicUrl) {
+      if (autoCopy === 'md') {
+        await copyText(
+          formatMarkdownImage(item.fileName || file.name, item.publicUrl),
+          '已传图床并复制 Markdown 链接',
+        )
+      } else if (autoCopy === 'url') {
+        await copyText(item.publicUrl, '已传图床并复制公网直链')
+      } else {
+        showToast(`已传图床：${item.fileName}`)
+      }
+      void loadMedia(true)
+    } else {
+      showToast(`已同步：${item.fileName || file.name}`)
+    }
   }
 
   async function uploadChunkedFile(
@@ -247,6 +434,8 @@ export function useDropStore() {
       maxDownloads: number
       passcode: string
       addToClip: boolean
+      skipShare?: boolean
+      autoCopyFormat?: 'md' | 'url' | 'none'
     },
   ) {
     const abortCtrl = new AbortController()
@@ -262,6 +451,7 @@ export function useDropStore() {
     })
     uploads.value = [task, ...uploads.value]
     const startedAt = performance.now()
+    const skipShare = opts.skipShare ?? true
 
     let uploadId = ''
     try {
@@ -278,6 +468,7 @@ export function useDropStore() {
           maxDownloads: opts.maxDownloads,
           passcode: opts.passcode,
           addToClip: opts.addToClip,
+          skipShare,
         }),
         signal: abortCtrl.signal,
       })
@@ -285,12 +476,12 @@ export function useDropStore() {
         const errBody = await initRes.json().catch(() => ({ error: '初始化上传失败' }))
         throw new Error(errBody.error || '初始化上传失败')
       }
-      const initData: { uploadId: string; chunkSize: number; totalParts: number } = await initRes.json()
+      const initData: { uploadId: string; chunkSize: number; totalParts: number } =
+        await initRes.json()
       uploadId = initData.uploadId
       const chunkSize = initData.chunkSize
       const totalParts = initData.totalParts
 
-      // Upload up to 3 chunks in parallel (each <= 20 MiB to pass Cloudflare cleanly)
       const partProgress = new Array<number>(totalParts).fill(0)
       let nextPart = 1
 
@@ -340,17 +531,46 @@ export function useDropStore() {
         const errBody = await compRes.json().catch(() => ({ error: '合并入库失败' }))
         throw new Error(errBody.error || '合并入库失败')
       }
-      const compData: { share: ShareItem; publicUrl?: string } = await compRes.json()
+      const compData: { share?: ShareItem; publicUrl?: string; clip?: ClipItem } =
+        await compRes.json()
       task.status = 'done'
-      task.shareCode = compData.share.code
       task.publicUrl = compData.publicUrl
-      if (!shares.value.some((s) => s.code === compData.share.code)) {
-        shares.value = [compData.share, ...shares.value]
+      if (compData.clip && !clips.value.some((c) => c.id === compData.clip?.id)) {
+        clips.value = [compData.clip, ...clips.value]
+      }
+      if (compData.share) {
+        task.shareCode = compData.share.code
+        if (!shares.value.some((s) => s.code === compData.share?.code)) {
+          shares.value = [compData.share, ...shares.value]
+        }
       }
       if (opts.target === 'silo') {
         void loadMedia(true)
+        if (siloObjects.value.length > 0) void loadSiloVault(false)
+      } else if (opts.target === 'gdrive') {
+        if (gdriveFiles.value.length > 0) void loadGDriveFiles()
       }
-      await copyText(shareFullUrl(compData.share.code), '上传完成，分享链接已复制')
+
+      if (compData.share) {
+        await copyText(shareFullUrl(compData.share.code), '上传完成，公开短链已复制')
+      } else if (
+        opts.target === 'silo' &&
+        compData.publicUrl &&
+        file.type.startsWith('image/') &&
+        opts.autoCopyFormat &&
+        opts.autoCopyFormat !== 'none'
+      ) {
+        if (opts.autoCopyFormat === 'md') {
+          await copyText(
+            formatMarkdownImage(compData.clip?.fileName || file.name, compData.publicUrl),
+            '已传图床并复制 Markdown 链接',
+          )
+        } else {
+          await copyText(compData.publicUrl, '已传图床并复制直链')
+        }
+      } else {
+        showToast(`上传完成：${file.name}`)
+      }
     } catch (e: unknown) {
       if (abortCtrl.signal.aborted) {
         task.status = 'canceled'
@@ -362,26 +582,37 @@ export function useDropStore() {
     }
   }
 
-  async function playTrack(track: MediaItem) {
+  async function playTrack(track: MediaItem, queue?: MediaItem[]) {
+    if (queue && queue.length > 0) {
+      activeQueueKeys.value = queue.map((t) => t.key)
+    }
+    const parsed = parseTrackDisplayName(track, catalogTracks.value)
     currentTrack.value = track
     currentMeta.value = {
-      title: track.name.replace(/\.[^.]+$/, ''),
-      artist: track.folder,
-      album: '',
+      title: parsed.title,
+      artist: parsed.artist,
+      album: parsed.album,
       format: track.ext,
-      hasCover: false,
+      hasCover: Boolean(parsed.coverUrl),
     }
-    currentCoverUrl.value = ''
+    currentCoverUrl.value = parsed.coverUrl || ''
     currentLyrics.value = []
     isPlaying.value = true
 
     const res = await fetch(`/api/media/track-meta?key=${encodeURIComponent(track.key)}`)
     if (res.ok && currentTrack.value?.key === track.key) {
       const d: { meta: TrackMetadata; coverUrl: string; lyrics: string } = await res.json()
-      currentMeta.value = d.meta
-      currentCoverUrl.value = d.coverUrl || ''
+      // Prefer clean DB/filename title & artist if ID3 was blank or garbled
+      currentMeta.value = {
+        ...d.meta,
+        title: parsed.title || d.meta.title,
+        artist: parsed.artist || d.meta.artist,
+        album: parsed.album || d.meta.album,
+      }
+      const bestCover = d.coverUrl || parsed.coverUrl || ''
+      currentCoverUrl.value = bestCover
       currentLyrics.value = parseLrc(d.lyrics || '')
-      applyAmbientFromCover(d.coverUrl || '')
+      applyAmbientFromCover(bestCover)
     }
   }
 
@@ -398,8 +629,14 @@ export function useDropStore() {
     audioCount,
     audioTracks,
     imageItems,
+    siloObjects,
+    siloFolders,
+    gdriveFiles,
+    playlists,
+    catalogTracks,
     uploads,
     toastText,
+    qrModal,
     currentTrack,
     currentMeta,
     currentCoverUrl,
@@ -407,8 +644,19 @@ export function useDropStore() {
     isPlaying,
     audioProgress,
     audioDuration,
+    playMode,
+    audioVolume,
+    activeQueueKeys,
+    openQrModal,
+    closeQrModal,
+    setPlayMode,
+    cyclePlayMode,
+    setVolume,
     loadInitial,
     loadMedia,
+    loadSiloVault,
+    loadGDriveFiles,
+    loadMusicCatalog,
     connectSSE,
     sendTextClip,
     sendQuickPasteFile,

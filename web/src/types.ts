@@ -24,6 +24,9 @@ export interface ClipItem {
   mimeType?: string
   size?: number
   sha256?: string
+  storage?: 'local' | 'silo' | 'gdrive'
+  storageKey?: string
+  publicUrl?: string
   shareCode?: string
   pinned: boolean
   createdAt: string
@@ -58,6 +61,48 @@ export interface MediaItem {
   lyricsKey?: string
 }
 
+export interface VaultObject {
+  key: string
+  name: string
+  folder: string
+  kind: 'image' | 'audio' | 'video' | 'doc' | 'archive' | 'other'
+  ext: string
+  size: number
+  lastModified: string
+  publicUrl?: string
+  streamUrl: string
+  thumbUrl?: string
+  protected: boolean
+}
+
+export interface GDriveFile {
+  path: string
+  name: string
+  folder: string
+  kind: 'image' | 'audio' | 'video' | 'doc' | 'archive' | 'other'
+  ext: string
+  size: number
+  mimeType: string
+  lastModified: string
+  streamUrl: string
+}
+
+export interface CatalogPlaylist {
+  id: number
+  name: string
+  coverUrl?: string
+  trackCount: number
+  trackKeys: string[]
+}
+
+export interface CatalogTrackInfo {
+  title: string
+  artist: string
+  album?: string
+  coverUrl?: string
+  durationMs?: number
+}
+
 export interface TrackMetadata {
   title: string
   artist: string
@@ -86,4 +131,12 @@ export interface UploadTask {
 export interface LrcLine {
   time: number
   text: string
+}
+
+export type PlayMode = 'sequence' | 'shuffle' | 'one'
+
+export interface QrModalPayload {
+  title: string
+  url: string
+  subtitle?: string
 }

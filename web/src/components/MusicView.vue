@@ -1,19 +1,20 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
+  copyText,
   formatBytes,
+  parseTrackDisplayName,
   shareFullUrl,
-  showToast,
   useDropStore,
 } from '../composables/useDropStore'
 import type { MediaItem } from '../types'
-import CopyPill from './CopyPill.vue'
 import UiIcon from './UiIcon.vue'
 
 const store = useDropStore()
 const search = ref('')
-const activeFolder = ref('')
-const trackShares = ref<Record<string, string>>({})
+const selectedPlaylistId = ref<number | 'all'>('all')
+const showLyricsSheet = ref(true)
+const lyricsContainer = ref<HTMLElement | null>(null)
 
 const scrubEl = ref<HTMLElement | null>(null)
 const isScrubbing = ref(false)
@@ -23,20 +24,34 @@ onMounted(() => {
   if (store.mediaItems.value.length === 0) {
     void store.loadMedia(false)
   }
+  if (store.playlists.value.length === 0) {
+    void store.loadMusicCatalog(false)
+  }
 })
 
-const audioFolders = computed(() => {
-  const s = new Set<string>()
-  for (const t of store.audioTracks.value) s.add(t.folder)
-  return Array.from(s).sort()
-})
+async function refreshMusic() {
+  await Promise.all([store.loadMedia(true), store.loadMusicCatalog(true)])
+}
 
 const filteredTracks = computed(() => {
   const q = search.value.trim().toLowerCase()
-  return store.audioTracks.value.filter((t) => {
-    if (activeFolder.value && t.folder !== activeFolder.value) return false
-    if (q && !t.key.toLowerCase().includes(q)) return false
-    return true
+  let base = store.audioTracks.value
+  if (selectedPlaylistId.value !== 'all') {
+    const pl = store.playlists.value.find((p) => p.id === selectedPlaylistId.value)
+    if (pl) {
+      const orderMap = new Map<string, number>()
+      pl.trackKeys.forEach((k, idx) => orderMap.set(k, idx))
+      base = base
+        .filter((t) => orderMap.has(t.key))
+        .slice()
+        .sort((a, b) => (orderMap.get(a.key) ?? 0) - (orderMap.get(b.key) ?? 0))
+    }
+  }
+  if (!q) return base
+  return base.filter((t) => {
+    const info = parseTrackDisplayName(t, store.catalogTracks.value)
+    const hay = `${t.name} ${info.title} ${info.artist} ${info.album}`.toLowerCase()
+    return hay.includes(q)
   })
 })
 
@@ -46,27 +61,57 @@ const progressRatio = computed(() => {
   return Math.min(1, Math.max(0, store.audioProgress.value / dur))
 })
 
-const activeLyricText = computed(() => {
+const activeLyricIndex = computed(() => {
   const lines = store.currentLyrics.value
-  if (!lines.length) return ''
+  if (!lines.length) return -1
   const t = store.audioProgress.value
-  let txt = lines[0]?.text || ''
+  let idx = 0
   for (let i = 0; i < lines.length; i++) {
-    if (t >= lines[i].time) txt = lines[i].text
+    if (t >= lines[i].time) idx = i
     else break
   }
-  return txt
+  return idx
 })
+
+const activeLyricText = computed(() => {
+  const idx = activeLyricIndex.value
+  return idx >= 0 ? store.currentLyrics.value[idx]?.text || '' : ''
+})
+
+// Auto-center active lyric line smoothly inside scrolling lyrics drawer
+watch(activeLyricIndex, async (idx) => {
+  if (idx < 0 || !showLyricsSheet.value) return
+  await nextTick()
+  const box = lyricsContainer.value
+  if (!box) return
+  const lineEl = box.querySelector<HTMLElement>(`[data-lrc="${idx}"]`)
+  if (lineEl) {
+    const targetTop = lineEl.offsetTop - box.clientHeight / 2 + lineEl.clientHeight / 2
+    box.scrollTo({ top: Math.max(0, targetTop), behavior: 'smooth' })
+  }
+})
+
+function seekToTime(sec: number) {
+  window.dispatchEvent(new CustomEvent('oarc-audio-seek', { detail: sec }))
+}
+
+function playFromFiltered(track: MediaItem) {
+  void store.playTrack(track, filteredTracks.value)
+}
 
 function togglePlay() {
   if (!store.currentTrack.value && filteredTracks.value.length > 0) {
-    void store.playTrack(filteredTracks.value[0])
+    playFromFiltered(filteredTracks.value[0])
     return
   }
   window.dispatchEvent(new CustomEvent('oarc-audio-toggle'))
 }
 
 function stepTrack(delta: number) {
+  if (!store.currentTrack.value && filteredTracks.value.length > 0) {
+    playFromFiltered(filteredTracks.value[0])
+    return
+  }
   window.dispatchEvent(new CustomEvent('oarc-audio-step', { detail: delta }))
 }
 
@@ -81,7 +126,7 @@ function seekFromClientX(clientX: number) {
   else jellyStretch.value = 0
 
   const clamped = Math.min(1, Math.max(0, raw))
-  window.dispatchEvent(new CustomEvent('oarc-audio-seek', { detail: clamped * dur }))
+  seekToTime(clamped * dur)
 }
 
 function onScrubDown(e: PointerEvent) {
@@ -104,18 +149,23 @@ onBeforeUnmount(() => {
   isScrubbing.value = false
 })
 
-async function createTrackShare(track: MediaItem) {
-  const res = await fetch('/api/shares/from-silo', {
+async function shareTrack(track: MediaItem) {
+  const res = await fetch('/api/shares/create', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ key: track.key, size: track.size, ttlHours: 0 }),
+    body: JSON.stringify({
+      storage: 'silo',
+      key: track.key,
+      fileName: track.name,
+      size: track.size,
+      ttlHours: 0,
+    }),
   })
   if (res.ok) {
     const sh = await res.json()
     const url = shareFullUrl(sh.code)
-    trackShares.value[track.key] = url
-    await navigator.clipboard.writeText(url).catch(() => {})
-    showToast('音频分享短链已生成并复制')
+    await copyText(url, '歌曲公开短链已复制')
+    store.openQrModal(track.name, url, '外部访客扫码免登录试听或下载真名音频')
   }
 }
 
@@ -125,197 +175,266 @@ function fmtSec(sec: number): string {
   const s = Math.floor(sec % 60)
   return `${m}:${String(s).padStart(2, '0')}`
 }
+
+const playModeIcon = computed(() => {
+  if (store.playMode.value === 'shuffle') return 'shuffle'
+  if (store.playMode.value === 'one') return 'repeat-one'
+  return 'repeat'
+})
+
+const playModeTitle = computed(() => {
+  if (store.playMode.value === 'shuffle') return '当前：随机播放（点击切换）'
+  if (store.playMode.value === 'one') return '当前：单曲循环（点击切换）'
+  return '当前：列表循环（点击切换）'
+})
 </script>
 
 <template>
   <div class="music-page">
     <header class="pane-header">
       <div class="pane-title-wrap">
-        <h1 class="pane-title">Silo 音乐</h1>
-        <p class="pane-subtitle">共 {{ store.audioCount.value }} 首曲目 · 支持无损流式播放与同步歌词</p>
+        <h1 class="pane-title">音乐厅</h1>
+        <p class="pane-subtitle">
+          共 {{ store.audioCount.value }} 首真名曲库 · 联动博客歌单封面与 262 份可点选同步歌词
+        </p>
       </div>
 
       <div class="pane-actions search-bar-wrap">
         <div class="search-pill">
           <UiIcon name="search" :size="14.5" />
-          <input v-model="search" placeholder="搜索曲目…" />
+          <input v-model="search" placeholder="搜歌手、歌名或专辑…" />
         </div>
-        <button type="button" class="icon-circle-btn" title="刷新曲库" @click="store.loadMedia(true)">
+        <button type="button" class="icon-circle-btn" title="刷新曲库与歌单" @click="refreshMusic">
           <UiIcon name="refresh" :size="14.5" />
         </button>
       </div>
     </header>
 
     <div class="pane-body--narrow music-stack">
-      <!-- Top: Symmetrical Wide Hi-Fi Vinyl Deck (no uneven side columns!) -->
-      <section class="glass-box turntable-deck">
-        <div class="platter-box">
-          <div
-            class="vinyl-platter"
-            :class="{ 'is-spinning': store.isPlaying.value && Boolean(store.currentTrack.value) }"
-          >
-            <div class="vinyl-grooves" />
-            <div class="vinyl-sheen" />
-            <div class="vinyl-label">
-              <img v-if="store.currentCoverUrl.value" :src="store.currentCoverUrl.value" alt="" />
-              <div v-else class="label-fallback" />
-              <span class="spindle-hole" />
-            </div>
-          </div>
-
-          <div
-            class="tonearm"
-            :class="{ 'is-engaged': store.isPlaying.value && Boolean(store.currentTrack.value) }"
-          >
-            <div class="arm-pivot" />
-            <div class="arm-rod" />
-            <div class="arm-head" />
-          </div>
-        </div>
-
-        <div class="deck-console">
-          <div class="deck-status-line">
-            <div class="now-pill">
-              <div class="eq-bars" :class="{ 'is-paused': !store.isPlaying.value }">
-                <span /><span /><span /><span />
+      <!-- Top: Vinyl Turntable + Interactive Scrolling Lyrics Drawer -->
+      <section class="glass-box deck-wrapper">
+        <div class="turntable-deck">
+          <div class="platter-box">
+            <div
+              class="vinyl-platter"
+              :class="{ 'is-spinning': store.isPlaying.value && Boolean(store.currentTrack.value) }"
+            >
+              <div class="vinyl-grooves" />
+              <div class="vinyl-sheen" />
+              <div class="vinyl-label">
+                <img v-if="store.currentCoverUrl.value" :src="store.currentCoverUrl.value" alt="" />
+                <div v-else class="label-fallback" />
+                <span class="spindle-hole" />
               </div>
-              <span class="mono">NOW PLAYING</span>
             </div>
-            <span class="rpm-tag mono">
-              <template v-if="store.currentMeta.value?.sampleRate">
-                {{ store.currentMeta.value.format }} · {{ (store.currentMeta.value.sampleRate / 1000).toFixed(1) }}kHz / {{ store.currentMeta.value.bitsPerSample }}bit
+
+            <div
+              class="tonearm"
+              :class="{ 'is-engaged': store.isPlaying.value && Boolean(store.currentTrack.value) }"
+            >
+              <div class="arm-pivot" />
+              <div class="arm-rod" />
+              <div class="arm-head" />
+            </div>
+          </div>
+
+          <div class="deck-console">
+            <div class="deck-status-line">
+              <div class="now-pill">
+                <div class="eq-bars" :class="{ 'is-paused': !store.isPlaying.value }">
+                  <span /><span /><span /><span />
+                </div>
+                <span class="mono">NOW PLAYING</span>
+              </div>
+
+              <button
+                v-if="store.currentLyrics.value.length > 0"
+                type="button"
+                class="lrc-toggle-pill"
+                :class="{ 'is-on': showLyricsSheet }"
+                @click="showLyricsSheet = !showLyricsSheet"
+              >
+                {{ showLyricsSheet ? '收起词谱' : '展开词谱' }}
+              </button>
+            </div>
+
+            <div class="deck-title">
+              {{ store.currentMeta.value?.title || '点击下方歌曲开始播放' }}
+            </div>
+            <div class="deck-sub">
+              <template v-if="store.currentMeta.value?.artist">
+                {{ store.currentMeta.value.artist }}
+                <template v-if="store.currentMeta.value?.album">
+                  · {{ store.currentMeta.value.album }}
+                </template>
               </template>
-              <template v-else>{{ store.currentMeta.value?.format || '33⅓ RPM' }}</template>
-            </span>
-          </div>
-
-          <div class="deck-title">
-            {{ store.currentMeta.value?.title || '未选择曲目' }}
-          </div>
-          <div class="deck-sub">
-            <template v-if="activeLyricText">
-              <span class="live-lyric">{{ activeLyricText }}</span>
-            </template>
-            <template v-else>
-              {{ store.currentMeta.value?.artist || (store.currentTrack.value ? store.currentTrack.value.folder : '点击下方列表即可播放，切换页面不会中断') }}
-            </template>
-          </div>
-
-          <!-- Jelly Scrubber -->
-          <div
-            ref="scrubEl"
-            class="jelly-scrubber"
-            :class="{ 'is-dragging': isScrubbing }"
-            :style="{
-              transform: `translateX(${jellyStretch}px) scaleX(${1 + Math.abs(jellyStretch) * 0.004})`,
-            }"
-            @pointerdown="onScrubDown"
-            @pointermove="onScrubMove"
-            @pointerup="onScrubUp"
-            @pointercancel="onScrubUp"
-          >
-            <div class="scrub-track">
-              <div class="scrub-fill" :style="{ width: `${progressRatio * 100}%` }" />
+              <template v-else-if="activeLyricText">{{ activeLyricText }}</template>
+              <template v-else>支持随机播放、点击任意歌词跳进度、锁屏封面切歌</template>
             </div>
-            <div class="scrub-times mono">
-              <span>{{ fmtSec(store.audioProgress.value) }}</span>
-              <span>{{ fmtSec(store.audioDuration.value) }}</span>
-            </div>
-          </div>
 
-          <div class="deck-transport">
-            <button type="button" class="icon-circle-btn" title="上一曲" @click="stepTrack(-1)">
-              <UiIcon name="prev" :size="15" />
-            </button>
-            <button type="button" class="play-main-btn" @click="togglePlay">
-              <UiIcon :name="store.isPlaying.value ? 'pause' : 'play'" :size="17" />
-            </button>
-            <button type="button" class="icon-circle-btn" title="下一曲" @click="stepTrack(1)">
-              <UiIcon name="next" :size="15" />
-            </button>
+            <!-- Jelly Scrubber -->
+            <div
+              ref="scrubEl"
+              class="jelly-scrubber"
+              :style="{
+                transform: `translateX(${jellyStretch}px) scaleX(${1 + Math.abs(jellyStretch) * 0.004})`,
+              }"
+              @pointerdown="onScrubDown"
+              @pointermove="onScrubMove"
+              @pointerup="onScrubUp"
+              @pointercancel="onScrubUp"
+            >
+              <div class="scrub-track">
+                <div class="scrub-fill" :style="{ width: `${progressRatio * 100}%` }" />
+              </div>
+              <div class="scrub-times mono">
+                <span>{{ fmtSec(store.audioProgress.value) }}</span>
+                <span>{{ fmtSec(store.audioDuration.value) }}</span>
+              </div>
+            </div>
+
+            <!-- Upgraded Transport: Mode + Prev/Play/Next + Volume -->
+            <div class="deck-transport">
+              <button
+                type="button"
+                class="icon-circle-btn"
+                :class="{ 'mode-active': store.playMode.value !== 'sequence' }"
+                :title="playModeTitle"
+                @click="store.cyclePlayMode"
+              >
+                <UiIcon :name="playModeIcon" :size="15" />
+              </button>
+
+              <button type="button" class="icon-circle-btn" title="上一曲" @click="stepTrack(-1)">
+                <UiIcon name="prev" :size="15" />
+              </button>
+              <button type="button" class="play-main-btn" @click="togglePlay">
+                <UiIcon :name="store.isPlaying.value ? 'pause' : 'play'" :size="17" />
+              </button>
+              <button type="button" class="icon-circle-btn" title="下一曲" @click="stepTrack(1)">
+                <UiIcon name="next" :size="15" />
+              </button>
+
+              <div class="vol-wrap hide-xs" title="调节音量">
+                <UiIcon name="volume" :size="14" class="vol-ico" />
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.02"
+                  :value="store.audioVolume.value"
+                  class="vol-slider"
+                  @input="store.setVolume(Number(($event.target as HTMLInputElement).value))"
+                />
+              </div>
+            </div>
           </div>
         </div>
+
+        <!-- Full Interactive Scrolling Lyrics Drawer -->
+        <Transition name="tray-expand">
+          <div
+            v-if="showLyricsSheet && store.currentLyrics.value.length > 0"
+            ref="lyricsContainer"
+            class="lyrics-drawer"
+          >
+            <button
+              v-for="(ln, idx) in store.currentLyrics.value"
+              :key="idx"
+              type="button"
+              :data-lrc="idx"
+              class="lrc-row"
+              :class="{ 'is-current': idx === activeLyricIndex }"
+              @click="seekToTime(ln.time)"
+            >
+              <span class="lrc-time mono">{{ fmtSec(ln.time) }}</span>
+              <span class="lrc-txt">{{ ln.text }}</span>
+            </button>
+          </div>
+        </Transition>
       </section>
 
-      <!-- Folder Filter -->
-      <div v-if="audioFolders.length > 1" class="folder-strip">
+      <!-- Blog Playlists Filter Pills -->
+      <div class="playlist-strip">
         <button
           type="button"
-          class="folder-chip"
-          :class="{ 'is-on': activeFolder === '' }"
-          @click="activeFolder = ''"
+          class="pl-chip"
+          :class="{ 'is-on': selectedPlaylistId === 'all' }"
+          @click="selectedPlaylistId = 'all'"
         >
-          全部目录
+          <span>全部曲库 ({{ store.audioTracks.value.length }})</span>
         </button>
         <button
-          v-for="f in audioFolders"
-          :key="f"
+          v-for="pl in store.playlists.value"
+          :key="pl.id"
           type="button"
-          class="folder-chip mono"
-          :class="{ 'is-on': activeFolder === f }"
-          @click="activeFolder = f"
+          class="pl-chip"
+          :class="{ 'is-on': selectedPlaylistId === pl.id }"
+          @click="selectedPlaylistId = pl.id"
         >
-          {{ f }}
+          <img v-if="pl.coverUrl" :src="pl.coverUrl" class="pl-ava" alt="" loading="lazy" />
+          <span>{{ pl.name }} ({{ pl.trackCount }})</span>
         </button>
       </div>
 
-      <!-- Bottom: Aligned Full-Width Track List -->
-      <div v-if="filteredTracks.length === 0" class="glass-box lib-empty">
-        Silo 桶内暂无音频 · 可在「快传投递」切到 `Silo (music/audio/)` 上传无损 FLAC 或 MP3
+      <!-- Track List -->
+      <div v-if="filteredTracks.length === 0" class="glass-box empty-box">
+        没有匹配的歌曲
       </div>
 
-      <div v-else class="glass-box track-table">
-        <article
-          v-for="(track, idx) in filteredTracks"
-          :key="track.key"
-          class="track-row"
-          :class="{ 'is-playing': store.currentTrack.value?.key === track.key }"
-          @click="store.playTrack(track)"
+      <div v-else class="track-list">
+        <div
+          v-for="(tr, idx) in filteredTracks"
+          :key="tr.key"
+          class="glass-box track-row"
+          :class="{ 'is-playing': store.currentTrack.value?.key === tr.key }"
+          @click="playFromFiltered(tr)"
         >
-          <span class="t-num mono">
-            <span
-              v-if="store.currentTrack.value?.key === track.key"
-              class="mini-eq"
-              :class="{ 'is-paused': !store.isPlaying.value }"
-            >
-              <i /><i /><i />
-            </span>
-            <template v-else>{{ String(idx + 1).padStart(2, '0') }}</template>
-          </span>
+          <span class="tr-idx mono">{{ String(idx + 1).padStart(2, '0') }}</span>
 
-          <div class="t-body">
-            <div class="t-name">{{ track.name.replace(/\.[^.]+$/, '') }}</div>
-            <div class="t-sub mono">{{ track.folder }} · {{ formatBytes(track.size) }}</div>
+          <img
+            v-if="store.catalogTracks.value[tr.key]?.coverUrl"
+            :src="store.catalogTracks.value[tr.key]?.coverUrl"
+            class="tr-cover"
+            alt=""
+            loading="lazy"
+          />
+          <div v-else class="tr-cover tr-cover--empty">
+            <UiIcon name="disc" :size="15" />
           </div>
 
-          <span class="t-fmt mono">{{ track.ext }}</span>
+          <div class="tr-meta">
+            <div class="tr-title">
+              {{ parseTrackDisplayName(tr, store.catalogTracks.value).title }}
+              <span v-if="tr.lyricsKey" class="lrc-badge mono">LRC</span>
+            </div>
+            <div class="tr-sub">
+              {{ parseTrackDisplayName(tr, store.catalogTracks.value).artist }}
+              <template v-if="parseTrackDisplayName(tr, store.catalogTracks.value).album">
+                · {{ parseTrackDisplayName(tr, store.catalogTracks.value).album }}
+              </template>
+              <span class="mono"> · {{ formatBytes(tr.size) }}</span>
+            </div>
+          </div>
 
-          <div class="t-acts" @click.stop>
-            <CopyPill
-              v-if="track.publicUrl"
-              :text="track.publicUrl"
-              label="直链"
-              copied-label="已复制"
-              compact
-            />
-            <CopyPill
-              v-if="trackShares[track.key]"
-              :text="trackShares[track.key]"
-              label="短链"
-              copied-label="已复制"
-              compact
-            />
-            <button
-              v-else
-              type="button"
-              class="mini-share-btn"
-              title="生成公开分享短链"
-              @click="createTrackShare(track)"
+          <div class="tr-acts" @click.stop>
+            <a
+              class="mini-circle"
+              :href="`${tr.streamUrl}&download=1`"
+              :title="`下载 ${tr.name}`"
             >
-              <UiIcon name="link" :size="13.5" />
+              <UiIcon name="download" :size="13.5" />
+            </a>
+            <button
+              type="button"
+              class="mini-circle"
+              title="生成歌曲分享短链 + 二维码"
+              @click="shareTrack(tr)"
+            >
+              <UiIcon name="qr" :size="13.5" />
             </button>
           </div>
-        </article>
+        </div>
       </div>
     </div>
   </div>
@@ -325,61 +444,42 @@ function fmtSec(sec: number): string {
 .music-stack {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 14px;
 }
 
-@media (max-width: 860px) {
-  .search-bar-wrap {
-    width: 100%;
-  }
+.deck-wrapper {
+  border-radius: 26px;
+  padding: 20px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
-/* Horizontal Wide Vinyl Deck */
 .turntable-deck {
-  padding: 24px 28px;
-  border-radius: 24px;
   display: grid;
-  grid-template-columns: 188px minmax(0, 1fr);
+  grid-template-columns: 168px 1fr;
   align-items: center;
-  gap: 28px;
-}
-
-@media (max-width: 640px) {
-  .turntable-deck {
-    grid-template-columns: 1fr;
-    justify-items: center;
-    text-align: center;
-    padding: 22px 18px;
-    gap: 18px;
-  }
-  .deck-console {
-    width: 100%;
-  }
-  .deck-transport {
-    justify-content: center !important;
-  }
+  gap: 24px;
 }
 
 .platter-box {
   position: relative;
-  width: 184px;
-  height: 176px;
+  width: 156px;
+  height: 156px;
   display: grid;
   place-items: center;
 }
 
 .vinyl-platter {
-  position: relative;
-  width: 168px;
-  height: 168px;
+  width: 148px;
+  height: 148px;
   border-radius: 50%;
-  background: #141519;
-  box-shadow:
-    0 16px 32px -10px rgba(0, 0, 0, 0.36),
-    inset 0 0 0 2px rgba(255, 255, 255, 0.08);
+  background: radial-gradient(circle, #1e293b 0%, #0f172a 68%, #020617 100%);
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.28);
+  position: relative;
   display: grid;
   place-items: center;
-  animation: record-turn 8.5s linear infinite;
+  animation: spin 16s linear infinite;
   animation-play-state: paused;
 }
 
@@ -387,47 +487,28 @@ function fmtSec(sec: number): string {
   animation-play-state: running;
 }
 
-@keyframes record-turn {
-  to { transform: rotate(360deg); }
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .vinyl-grooves {
   position: absolute;
-  inset: 9px;
+  inset: 10px;
   border-radius: 50%;
-  background: repeating-radial-gradient(
-    circle at center,
-    rgba(255, 255, 255, 0.045) 0px,
-    rgba(255, 255, 255, 0.045) 1px,
-    transparent 2px,
-    transparent 5px
-  );
-}
-
-.vinyl-sheen {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  background: conic-gradient(
-    from 35deg,
-    transparent 0deg,
-    rgba(255, 255, 255, 0.14) 38deg,
-    transparent 78deg,
-    transparent 180deg,
-    rgba(255, 255, 255, 0.12) 218deg,
-    transparent 260deg
-  );
+  border: 1px dashed rgba(255, 255, 255, 0.08);
 }
 
 .vinyl-label {
-  position: relative;
-  width: 62px;
-  height: 62px;
+  width: 68px;
+  height: 68px;
   border-radius: 50%;
   overflow: hidden;
-  box-shadow: 0 0 0 3px #0d0e11;
+  position: relative;
   display: grid;
   place-items: center;
+  background: linear-gradient(135deg, #3b82f6, #6366f1);
 }
 
 .vinyl-label img {
@@ -436,344 +517,399 @@ function fmtSec(sec: number): string {
   object-fit: cover;
 }
 
-.label-fallback {
-  width: 100%;
-  height: 100%;
-  background: linear-gradient(135deg, #fb923c, #f97316);
-}
-
 .spindle-hole {
   position: absolute;
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  background: var(--bg-window);
+  background: #0f172a;
+  border: 2px solid rgba(255, 255, 255, 0.7);
 }
 
 .tonearm {
   position: absolute;
-  top: 4px;
-  right: -2px;
-  width: 48px;
-  height: 118px;
-  transform-origin: 34px 14px;
-  transform: rotate(-26deg);
-  transition: transform 0.6s var(--ease-spring);
+  top: 6px;
+  right: -4px;
+  width: 34px;
+  height: 92px;
+  transform-origin: 22px 12px;
+  transform: rotate(-18deg);
+  transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
   pointer-events: none;
 }
 
 .tonearm.is-engaged {
-  transform: rotate(3deg);
+  transform: rotate(12deg);
 }
 
 .arm-pivot {
   position: absolute;
-  top: 3px;
-  right: 3px;
-  width: 22px;
-  height: 22px;
+  top: 4px;
+  right: 4px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
-  background: linear-gradient(145deg, #e2e8f0, #94a3b8);
-  box-shadow: 0 3px 8px rgba(0, 0, 0, 0.24);
+  background: linear-gradient(135deg, #e2e8f0, #94a3b8);
 }
 
 .arm-rod {
   position: absolute;
   top: 14px;
-  right: 12px;
+  right: 11px;
   width: 3px;
-  height: 86px;
-  border-radius: 99px;
-  background: linear-gradient(90deg, #cbd5e1, #f8fafc, #94a3b8);
-  transform: rotate(10deg);
-  transform-origin: top center;
-}
-
-.arm-head {
-  position: absolute;
-  bottom: 8px;
-  left: 8px;
-  width: 10px;
-  height: 15px;
-  border-radius: 3px;
-  background: #334155;
-  transform: rotate(24deg);
+  height: 66px;
+  background: linear-gradient(to bottom, #cbd5e1, #64748b);
+  border-radius: 2px;
 }
 
 .deck-console {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .deck-status-line {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: 8px;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .now-pill {
   display: inline-flex;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   font-size: 0.69rem;
   font-weight: 650;
-  letter-spacing: 0.06em;
-  color: var(--ink-2);
+  color: var(--accent);
 }
 
 .eq-bars {
   display: inline-flex;
   align-items: flex-end;
   gap: 2px;
-  height: 12px;
+  height: 11px;
 }
+
 .eq-bars span {
   width: 2.5px;
+  height: 100%;
+  background: var(--accent);
   border-radius: 2px;
-  background: var(--amber-eq);
-  animation: eq-mini 0.8s ease-in-out infinite alternate;
+  animation: eq 0.8s ease-in-out infinite alternate;
 }
-.eq-bars span:nth-child(2) { animation-delay: -0.2s; }
-.eq-bars span:nth-child(3) { animation-delay: -0.45s; }
-.eq-bars span:nth-child(4) { animation-delay: -0.15s; }
+.eq-bars span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.eq-bars span:nth-child(3) {
+  animation-delay: 0.35s;
+}
 .eq-bars.is-paused span {
   animation-play-state: paused;
-  height: 3px !important;
+  height: 35%;
 }
 
-@keyframes eq-mini {
-  from { height: 3px; }
-  to { height: 12px; }
+@keyframes eq {
+  from {
+    height: 25%;
+  }
+  to {
+    height: 100%;
+  }
 }
 
-.rpm-tag {
+.lrc-toggle-pill {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-recessed);
+  color: var(--ink-2);
   font-size: 0.72rem;
-  color: var(--ink-3);
+  cursor: pointer;
+}
+
+.lrc-toggle-pill.is-on {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
 .deck-title {
-  font-size: 1.18rem;
-  font-weight: 690;
-  color: var(--ink-1);
+  font-size: 1.12rem;
+  font-weight: 700;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .deck-sub {
-  margin-top: 4px;
-  min-height: 22px;
-  font-size: 0.83rem;
-  color: var(--ink-2);
+  font-size: 0.81rem;
+  color: var(--ink-3);
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.live-lyric {
-  color: var(--ink-1);
-  font-weight: 580;
 }
 
 .jelly-scrubber {
-  margin-top: 14px;
-  padding: 6px 0;
+  margin-top: 4px;
   cursor: pointer;
   user-select: none;
   touch-action: none;
-  transition: transform 0.34s var(--ease-spring);
 }
 
 .scrub-track {
   height: 6px;
   border-radius: 999px;
-  background: var(--surface-recessed-hover);
+  background: var(--surface-recessed);
   overflow: hidden;
-  transition: height 0.24s var(--ease-spring);
-}
-
-.jelly-scrubber:hover .scrub-track,
-.jelly-scrubber.is-dragging .scrub-track {
-  height: 11px;
 }
 
 .scrub-fill {
   height: 100%;
+  background: var(--accent);
   border-radius: 999px;
-  background: linear-gradient(90deg, #fb923c, var(--amber-eq));
-  transition: width 0.1s linear;
 }
 
 .scrub-times {
-  margin-top: 5px;
+  margin-top: 4px;
   display: flex;
   justify-content: space-between;
-  font-size: 0.71rem;
+  font-size: 0.7rem;
   color: var(--ink-3);
 }
 
 .deck-transport {
-  margin-top: 8px;
+  margin-top: 2px;
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+}
+
+.mode-active {
+  color: var(--accent);
+  background: var(--accent-soft);
 }
 
 .play-main-btn {
   width: 42px;
   height: 42px;
   border-radius: 50%;
-  border: 0;
-  background: var(--cta-bg);
-  color: var(--cta-fg);
+  border: none;
+  background: var(--accent);
+  color: #fff;
   display: grid;
   place-items: center;
   cursor: pointer;
-  box-shadow: 0 8px 20px -6px rgba(0, 0, 0, 0.28);
-  transition: transform 0.22s var(--ease-spring);
+  box-shadow: 0 6px 18px rgba(0, 113, 227, 0.28);
 }
 
-.play-main-btn:hover {
-  transform: scale(1.06);
-}
-
-.folder-strip {
+.vol-wrap {
+  margin-left: auto;
   display: flex;
+  align-items: center;
   gap: 6px;
-  overflow-x: auto;
-}
-
-.folder-chip {
-  height: 29px;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid var(--border-hairline);
-  background: var(--surface-card);
-  color: var(--ink-2);
-  font-size: 0.75rem;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.folder-chip.is-on {
-  background: var(--cta-bg);
-  color: var(--cta-fg);
-  border-color: transparent;
-}
-
-.lib-empty {
-  padding: 48px 20px;
-  text-align: center;
-  font-size: 0.84rem;
   color: var(--ink-3);
 }
 
-/* Aligned Track Table */
-.track-table {
-  border-radius: 22px;
-  overflow: hidden;
+.vol-slider {
+  width: 82px;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.lyrics-drawer {
+  max-height: 184px;
+  overflow-y: auto;
+  padding: 10px 8px;
+  border-top: 1px solid var(--border-hairline);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lrc-row {
+  border: none;
+  background: transparent;
+  padding: 5px 10px;
+  border-radius: 10px;
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  text-align: left;
+  color: var(--ink-3);
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.lrc-row:hover {
+  background: var(--surface-recessed);
+  color: var(--ink-1);
+}
+
+.lrc-row.is-current {
+  color: var(--accent);
+  font-weight: 660;
+  font-size: 0.9rem;
+  background: var(--accent-soft);
+}
+
+.lrc-time {
+  font-size: 0.69rem;
+  opacity: 0.65;
+  flex-shrink: 0;
+}
+
+.playlist-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.pl-chip {
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-hairline);
+  background: var(--surface-recessed);
+  color: var(--ink-2);
+  font-size: 0.76rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.pl-chip.is-on {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: rgba(0, 113, 227, 0.28);
+  font-weight: 630;
+}
+
+.pl-ava {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.track-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
 }
 
 .track-row {
-  padding: 13px 18px;
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto auto;
+  padding: 9px 14px;
+  border-radius: 16px;
+  display: flex;
   align-items: center;
-  gap: 12px;
-  border-bottom: 1px solid var(--border-hairline);
+  gap: 11px;
   cursor: pointer;
-  transition: background-color 0.18s ease;
-}
-
-.track-row:last-child {
-  border-bottom: 0;
-}
-
-.track-row:hover {
-  background: var(--surface-recessed);
+  transition: transform 0.15s ease, border-color 0.15s ease;
 }
 
 .track-row.is-playing {
-  background: rgba(249, 115, 22, 0.07);
+  border-color: rgba(0, 113, 227, 0.36);
+  background: var(--accent-soft);
 }
 
-@media (max-width: 560px) {
-  .track-row {
-    padding: 12px 14px;
-    grid-template-columns: 26px minmax(0, 1fr) auto;
-  }
-  .t-fmt {
-    display: none;
-  }
-}
-
-.t-num {
-  font-size: 0.77rem;
+.tr-idx {
+  width: 22px;
+  font-size: 0.73rem;
   color: var(--ink-3);
-  display: flex;
-  align-items: center;
+  text-align: center;
 }
 
-.mini-eq {
-  display: inline-flex;
-  align-items: flex-end;
-  gap: 2px;
-  height: 12px;
-}
-.mini-eq i {
-  width: 2.5px;
-  border-radius: 2px;
-  background: var(--amber-eq);
-  animation: eq-mini 0.75s ease-in-out infinite alternate;
-}
-.mini-eq i:nth-child(2) { animation-delay: -0.25s; }
-.mini-eq i:nth-child(3) { animation-delay: -0.45s; }
-.mini-eq.is-paused i {
-  animation-play-state: paused;
-  height: 3px !important;
+.tr-cover {
+  width: 38px;
+  height: 38px;
+  border-radius: 9px;
+  object-fit: cover;
+  flex-shrink: 0;
 }
 
-.t-body {
+.tr-cover--empty {
+  background: var(--surface-recessed);
+  color: var(--ink-3);
+  display: grid;
+  place-items: center;
+}
+
+.tr-meta {
+  flex: 1;
   min-width: 0;
 }
 
-.t-name {
-  font-size: 0.88rem;
-  font-weight: 620;
+.tr-title {
+  font-size: 0.86rem;
+  font-weight: 630;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.t-sub {
-  font-size: 0.73rem;
-  color: var(--ink-3);
-  margin-top: 2px;
-}
-
-.t-fmt {
-  font-size: 0.7rem;
-  padding: 2px 8px;
-  border-radius: 999px;
+.lrc-badge {
+  font-size: 0.62rem;
+  padding: 1px 5px;
+  border-radius: 5px;
   background: var(--surface-recessed);
   color: var(--ink-2);
 }
 
-.t-acts {
-  display: flex;
-  align-items: center;
-  gap: 5px;
+.tr-sub {
+  margin-top: 2px;
+  font-size: 0.73rem;
+  color: var(--ink-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.mini-share-btn {
+.tr-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mini-circle {
   width: 28px;
   height: 28px;
   border-radius: 50%;
   border: 1px solid var(--border-hairline);
-  background: var(--surface-card);
+  background: var(--surface-recessed);
   color: var(--ink-2);
   display: grid;
   place-items: center;
   cursor: pointer;
+  text-decoration: none;
+}
+
+.empty-box {
+  padding: 40px 20px;
+  text-align: center;
+  border-radius: 18px;
+  color: var(--ink-3);
+  font-size: 0.84rem;
+}
+
+@media (max-width: 720px) {
+  .turntable-deck {
+    grid-template-columns: 1fr;
+    justify-items: center;
+    text-align: center;
+  }
+  .deck-console {
+    width: 100%;
+  }
+  .deck-transport {
+    justify-content: center;
+  }
+  .hide-xs {
+    display: none;
+  }
 }
 </style>

@@ -30,6 +30,18 @@ withDefaults(
       | 'chevron-down'
       | 'file'
       | 'sparkles'
+      | 'qr'
+      | 'folder'
+      | 'grid'
+      | 'list'
+      | 'edit'
+      | 'shuffle'
+      | 'repeat'
+      | 'repeat-one'
+      | 'volume'
+      | 'clipboard'
+      | 'eye'
+      | 'cloud'
     size?: number
   }>(),
   { size: 16 },
@@ -59,6 +71,10 @@ withDefaults(
     <template v-else-if="name === 'copy'">
       <rect x="9" y="9" width="11" height="11" rx="2.5" />
       <path d="M5 15H4.5A2.5 2.5 0 0 1 2 12.5v-8A2.5 2.5 0 0 1 4.5 2h8A2.5 2.5 0 0 1 15 4.5V5" />
+    </template>
+    <template v-else-if="name === 'clipboard'">
+      <rect width="8" height="4" x="8" y="2" rx="1" />
+      <path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2" />
     </template>
     <template v-else-if="name === 'check'">
       <path d="M20 6 9 17l-5-5" stroke-width="2.2" />
@@ -163,6 +179,65 @@ withDefaults(
     </template>
     <template v-else-if="name === 'sparkles'">
       <path d="m12 3-1.9 5.8a2 2 0 0 1-1.3 1.3L3 12l5.8 1.9a2 2 0 0 1 1.3 1.3L12 21l1.9-5.8a2 2 0 0 1 1.3-1.3L21 12l-5.8-1.9a2 2 0 0 1-1.3-1.3Z" />
+    </template>
+    <template v-else-if="name === 'qr'">
+      <rect width="6" height="6" x="3" y="3" rx="1" />
+      <rect width="6" height="6" x="15" y="3" rx="1" />
+      <rect width="6" height="6" x="3" y="15" rx="1" />
+      <path d="M15 15h2v2h-2zM19 15h2v2h-2zM17 17h2v2h-2zM15 19h2v2h-2zM19 19h2v2h-2z" />
+    </template>
+    <template v-else-if="name === 'folder'">
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" />
+    </template>
+    <template v-else-if="name === 'grid'">
+      <rect width="7" height="7" x="3" y="3" rx="1.5" />
+      <rect width="7" height="7" x="14" y="3" rx="1.5" />
+      <rect width="7" height="7" x="14" y="14" rx="1.5" />
+      <rect width="7" height="7" x="3" y="14" rx="1.5" />
+    </template>
+    <template v-else-if="name === 'list'">
+      <line x1="8" x2="21" y1="6" y2="6" />
+      <line x1="8" x2="21" y1="12" y2="12" />
+      <line x1="8" x2="21" y1="18" y2="18" />
+      <line x1="3" x2="3.01" y1="6" y2="6" />
+      <line x1="3" x2="3.01" y1="12" y2="12" />
+      <line x1="3" x2="3.01" y1="18" y2="18" />
+    </template>
+    <template v-else-if="name === 'edit'">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z" />
+    </template>
+    <template v-else-if="name === 'shuffle'">
+      <path d="M2 18h1.4c1.3 0 2.5-.6 3.3-1.7l6.1-8.6c.7-1.1 2-1.7 3.3-1.7H22" />
+      <path d="m18 2 4 4-4 4" />
+      <path d="M2 6h1.9c1.5 0 2.9.9 3.6 2.2" />
+      <path d="M22 18h-5.9c-1.3 0-2.6-.7-3.3-1.8l-.5-.8" />
+      <path d="m18 14 4 4-4 4" />
+    </template>
+    <template v-else-if="name === 'repeat'">
+      <path d="m17 2 4 4-4 4" />
+      <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+      <path d="m7 22-4-4 4-4" />
+      <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+    </template>
+    <template v-else-if="name === 'repeat-one'">
+      <path d="m17 2 4 4-4 4" />
+      <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
+      <path d="m7 22-4-4 4-4" />
+      <path d="M21 13v1a4 4 0 0 1-4 4H3" />
+      <path d="M11 10h1v4" />
+    </template>
+    <template v-else-if="name === 'volume'">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+      <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
+      <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
+    </template>
+    <template v-else-if="name === 'eye'">
+      <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z" />
+      <circle cx="12" cy="12" r="3" />
+    </template>
+    <template v-else-if="name === 'cloud'">
+      <path d="M17.5 19H9a7 7 0 1 1 6.71-9h1.79a4.5 4.5 0 1 1 0 9Z" />
     </template>
   </svg>
 </template>

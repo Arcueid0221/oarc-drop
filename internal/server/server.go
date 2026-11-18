@@ -45,6 +45,7 @@ type Config struct {
 	GDriveRemoteDir   string // e.g. "gdrive:OArc-Drop" (empty disables Google Drive target)
 	RcloneBin         string // default "rclone"
 	RcloneConfig      string // optional path to rclone.conf
+	AuroraAPIBase     string // optional e.g. "http://backend:8080" for blog playlist/cover sync
 	RequireCFAccess   bool   // require Cf-Access-Authenticated-User-Email orCf-Access-Jwt-Assertion on /api/*
 	AdminToken        string // optional fallback bearer token for CLI / local use
 	PublicBaseURL     string // optional e.g. https://drop.arcueidblog.top
@@ -86,6 +87,10 @@ type Server struct {
 
 	trackMu    sync.RWMutex
 	trackCache map[string]cachedTrackMeta
+
+	catalogMu      sync.RWMutex
+	catalogFetched time.Time
+	catalogCache   *MusicCatalog
 }
 
 func New(cfg Config, st *store.Store) *Server {
@@ -141,13 +146,24 @@ func (s *Server) registerRoutes() {
 	// Shares management
 	s.mux.HandleFunc("GET /api/shares", s.adminOnly(s.handleListShares))
 	s.mux.HandleFunc("POST /api/shares/from-silo", s.adminOnly(s.handleCreateShareFromSilo))
+	s.mux.HandleFunc("POST /api/shares/create", s.adminOnly(s.handleCreateUniversalShare))
 	s.mux.HandleFunc("DELETE /api/shares/{code}", s.adminOnly(s.handleDeleteShare))
+	s.mux.HandleFunc("GET /api/qr", s.adminOnly(s.handleQR))
 
-	// Silo Media Index (Gallery + Music)
+	// Unified File Vault (Silo all-formats + Google Drive)
+	s.mux.HandleFunc("GET /api/silo/objects", s.adminOnly(s.handleListSiloObjects))
+	s.mux.HandleFunc("POST /api/silo/rename", s.adminOnly(s.handleRenameSiloObject))
+	s.mux.HandleFunc("DELETE /api/silo/object", s.adminOnly(s.handleDeleteSiloObject))
+	s.mux.HandleFunc("GET /api/gdrive/files", s.adminOnly(s.handleListGDriveFiles))
+	s.mux.HandleFunc("GET /api/gdrive/stream", s.adminOnly(s.handleStreamGDriveFile))
+	s.mux.HandleFunc("DELETE /api/gdrive/file", s.adminOnly(s.handleDeleteGDriveFile))
+
+	// Silo Media Index (Gallery + Music + Blog Playlists)
 	s.mux.HandleFunc("GET /api/media", s.adminOnly(s.handleListMedia))
 	s.mux.HandleFunc("GET /api/media/stream", s.adminOnly(s.handleStreamMedia))
 	s.mux.HandleFunc("GET /api/media/track-meta", s.adminOnly(s.handleTrackMeta))
 	s.mux.HandleFunc("GET /api/media/cover", s.adminOnly(s.handleTrackCover))
+	s.mux.HandleFunc("GET /api/music/catalog", s.adminOnly(s.handleMusicCatalog))
 
 	// Public share endpoints — ALL under /s/* so a single Cloudflare Access Bypass rule (/s/*) covers UI + meta + download!
 	s.mux.HandleFunc("GET /s/{code}/meta", s.handlePublicShareMeta)
@@ -309,7 +325,7 @@ func (s *Server) handleCreateTextClip(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateFileClip(w http.ResponseWriter, r *http.Request) {
-	// Direct lossless clipboard paste for screenshots / files up to 25 MiB
+	// Direct lossless clipboard paste for screenshots / files up to 25 MiB (supports target=local or target=silo image host!)
 	r.Body = http.MaxBytesReader(w, r.Body, 25<<20)
 	if err := r.ParseMultipartForm(8 << 20); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "file exceeds quick-paste limit, use chunked drop"})
@@ -322,8 +338,88 @@ func (s *Server) handleCreateFileClip(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	id := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+	target := strings.TrimSpace(r.URL.Query().Get("target"))
+	if target == "" {
+		target = strings.TrimSpace(r.FormValue("target"))
+	}
+	if target == "" {
+		target = "local"
+	}
+	prefix := strings.TrimSpace(r.URL.Query().Get("prefix"))
+	if prefix == "" {
+		prefix = strings.TrimSpace(r.FormValue("prefix"))
+	}
+
 	safeName := store.SanitizeFileName(hdr.Filename)
+	mimeType := hdr.Header.Get("Content-Type")
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		if guessed := mime.TypeByExtension(strings.ToLower(filepath.Ext(safeName))); guessed != "" {
+			mimeType = guessed
+		} else {
+			mimeType = "application/octet-stream"
+		}
+	}
+	kind := "file"
+	if strings.HasPrefix(mimeType, "image/") {
+		kind = "image"
+	}
+
+	if target == "silo" {
+		if s.cfg.S3 == nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Silo not configured"})
+			return
+		}
+		tmpPath := filepath.Join(s.cfg.DataDir, "staging", fmt.Sprintf("paste_%d", time.Now().UTC().UnixNano()))
+		tmpF, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0o600)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "staging write failed"})
+			return
+		}
+		defer os.Remove(tmpPath)
+		hasher := sha256.New()
+		written, copyErr := io.Copy(io.MultiWriter(tmpF, hasher), file)
+		if copyErr != nil {
+			tmpF.Close()
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "paste read failed"})
+			return
+		}
+		_, _ = tmpF.Seek(0, io.SeekStart)
+		if prefix == "" {
+			prefix = "images/"
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+		objKey := s.resolveCleanSiloKey(ctx, prefix, safeName)
+		putErr := s.cfg.S3.PutObject(ctx, objKey, tmpF, written, mimeType, "public, max-age=2592000, immutable")
+		cancel()
+		tmpF.Close()
+		if putErr != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upload to Silo failed: " + putErr.Error()})
+			return
+		}
+		pubURL := s.cfg.S3.PublicObjectURL(objKey)
+		shaHex := hex.EncodeToString(hasher.Sum(nil))
+		item, err := s.store.AddStoredFileClip(store.ClipItem{
+			Kind:       kind,
+			FileName:   path.Base(objKey),
+			MimeType:   mimeType,
+			Size:       written,
+			SHA256:     shaHex[:16],
+			Storage:    "silo",
+			StorageKey: objKey,
+			PublicURL:  pubURL,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		s.invalidateMediaCache()
+		s.broadcast("media.refresh", map[string]string{"key": objKey})
+		s.broadcast("clip.created", item)
+		writeJSON(w, http.StatusCreated, item)
+		return
+	}
+
+	id := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
 	rel := filepath.Join("clips", id+"_"+safeName)
 	dstPath := filepath.Join(s.cfg.DataDir, rel)
 
@@ -341,18 +437,6 @@ func (s *Server) handleCreateFileClip(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	mimeType := hdr.Header.Get("Content-Type")
-	if mimeType == "" || mimeType == "application/octet-stream" {
-		if guessed := mime.TypeByExtension(strings.ToLower(filepath.Ext(safeName))); guessed != "" {
-			mimeType = guessed
-		} else {
-			mimeType = "application/octet-stream"
-		}
-	}
-	kind := "file"
-	if strings.HasPrefix(mimeType, "image/") {
-		kind = "image"
-	}
 	shaHex := hex.EncodeToString(hasher.Sum(nil))
 	item, err := s.store.AddFileClip("", kind, safeName, mimeType, written, shaHex[:16], rel, "")
 	if err != nil {
@@ -367,27 +451,49 @@ func (s *Server) handleCreateFileClip(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetClipRaw(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	c, err := s.store.GetClip(id)
-	if err != nil || c.LocalRel == "" {
-		http.NotFound(w, r)
-		return
-	}
-	full := filepath.Join(s.cfg.DataDir, c.LocalRel)
-	f, err := os.Open(full)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		http.NotFound(w, r)
+	isDownload := r.URL.Query().Get("download") == "1"
+	switch c.Storage {
+	case "silo":
+		if s.cfg.S3 == nil || c.StorageKey == "" {
+			http.NotFound(w, r)
+			return
+		}
+		s.proxyS3Object(w, r, c.StorageKey, c.FileName, isDownload)
 		return
+	case "gdrive":
+		if s.cfg.GDriveRemoteDir == "" || c.StorageKey == "" {
+			http.NotFound(w, r)
+			return
+		}
+		s.streamGDriveRel(w, r, c.StorageKey, c.FileName, c.MimeType, c.Size, isDownload)
+		return
+	default:
+		if c.LocalRel == "" {
+			http.NotFound(w, r)
+			return
+		}
+		full := filepath.Join(s.cfg.DataDir, c.LocalRel)
+		f, err := os.Open(full)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		defer f.Close()
+		st, err := f.Stat()
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		if c.MimeType != "" {
+			w.Header().Set("Content-Type", c.MimeType)
+		}
+		setContentDisposition(w, c.FileName, isDownload)
+		http.ServeContent(w, r, c.FileName, st.ModTime(), f)
 	}
-	if c.MimeType != "" {
-		w.Header().Set("Content-Type", c.MimeType)
-	}
-	setContentDisposition(w, c.FileName, r.URL.Query().Get("download") == "1")
-	http.ServeContent(w, r, c.FileName, st.ModTime(), f)
 }
 
 func (s *Server) handlePatchClip(w http.ResponseWriter, r *http.Request) {
@@ -422,6 +528,7 @@ func (s *Server) handleShareClip(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&opts)
 
+	storageType := "local"
 	var storageKey, fileName, mimeType string
 	var size int64
 	if c.Kind == "text" {
@@ -435,6 +542,12 @@ func (s *Server) handleShareClip(w http.ResponseWriter, r *http.Request) {
 		}
 		storageKey = rel
 		size = int64(len(c.Text))
+	} else if c.Storage == "silo" || c.Storage == "gdrive" {
+		storageType = c.Storage
+		storageKey = c.StorageKey
+		fileName = c.FileName
+		mimeType = c.MimeType
+		size = c.Size
 	} else {
 		storageKey = c.LocalRel
 		fileName = c.FileName
@@ -452,7 +565,7 @@ func (s *Server) handleShareClip(w http.ResponseWriter, r *http.Request) {
 		MimeType:     mimeType,
 		Size:         size,
 		SHA256:       c.SHA256,
-		Storage:      "local",
+		Storage:      storageType,
 		StorageKey:   storageKey,
 		ExpiresAt:    exp,
 		MaxDownloads: opts.MaxDownloads,
@@ -492,6 +605,7 @@ func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		MaxDownloads int    `json:"maxDownloads"`
 		Passcode     string `json:"passcode"`
 		AddToClip    bool   `json:"addToClip"`
+		SkipShare    bool   `json:"skipShare"`
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
@@ -545,6 +659,7 @@ func (s *Server) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		MaxDownloads: req.MaxDownloads,
 		Passcode:     req.Passcode,
 		AddToClip:    req.AddToClip,
+		SkipShare:    req.SkipShare,
 	}
 	s.store.CreateUploadSession(u)
 	if err := os.MkdirAll(filepath.Join(s.cfg.DataDir, "staging", u.ID), 0o755); err != nil {
@@ -652,13 +767,14 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request) {
 		storageKey = rel
 
 	case "silo":
-		objKey := u.SiloPrefix + ym + "/" + shaFull[:12] + "_" + u.FileName
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		objKey := s.resolveCleanSiloKey(ctx, u.SiloPrefix, u.FileName)
 		f, err := os.Open(assembled)
 		if err != nil {
+			cancel()
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "reopen assembled failed"})
 			return
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		putErr := s.cfg.S3.PutObject(ctx, objKey, f, totalWritten, u.MimeType, "public, max-age=2592000, immutable")
 		cancel()
 		f.Close()
@@ -666,13 +782,14 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadGateway, map[string]string{"error": "upload to Silo failed: " + putErr.Error()})
 			return
 		}
+		u.FileName = path.Base(objKey)
 		storageKey = objKey
 		publicURL = s.cfg.S3.PublicObjectURL(objKey)
 		s.invalidateMediaCache()
 		s.broadcast("media.refresh", map[string]string{"key": objKey})
 
 	case "gdrive":
-		relKey := ym + "/" + id[:8] + "_" + u.FileName
+		relKey := ym + "/" + u.FileName
 		dest := strings.TrimRight(s.cfg.GDriveRemoteDir, "/") + "/" + relKey
 		args := s.rcloneArgs("copyto", assembled, dest)
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
@@ -687,47 +804,65 @@ func (s *Server) handleUploadComplete(w http.ResponseWriter, r *http.Request) {
 		storageKey = relKey
 	}
 
-	var exp *time.Time
-	if u.TTLHours > 0 {
-		t := time.Now().UTC().Add(time.Duration(u.TTLHours) * time.Hour)
-		exp = &t
+	var sh *store.ShareItem
+	shareCode := ""
+	if !u.SkipShare {
+		var exp *time.Time
+		if u.TTLHours > 0 {
+			t := time.Now().UTC().Add(time.Duration(u.TTLHours) * time.Hour)
+			exp = &t
+		}
+		createdSh, err := s.store.CreateShare(store.ShareItem{
+			FileName:     u.FileName,
+			MimeType:     u.MimeType,
+			Size:         totalWritten,
+			SHA256:       shaFull[:16],
+			Storage:      u.Target,
+			StorageKey:   storageKey,
+			ExpiresAt:    exp,
+			MaxDownloads: u.MaxDownloads,
+		}, u.Passcode)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		sh = createdSh
+		shareCode = sh.Code
+		s.broadcast("share.created", sh)
 	}
-	sh, err := s.store.CreateShare(store.ShareItem{
-		FileName:     u.FileName,
-		MimeType:     u.MimeType,
-		Size:         totalWritten,
-		SHA256:       shaFull[:16],
-		Storage:      u.Target,
-		StorageKey:   storageKey,
-		ExpiresAt:    exp,
-		MaxDownloads: u.MaxDownloads,
-	}, u.Passcode)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	s.broadcast("share.created", sh)
 
 	var clipItem *store.ClipItem
-	if u.AddToClip {
+	if u.AddToClip || u.SkipShare {
 		kind := "file"
 		if strings.HasPrefix(u.MimeType, "image/") {
 			kind = "image"
 		}
-		localRel := ""
-		if u.Target == "local" {
-			localRel = storageKey
+		newClip := store.ClipItem{
+			Kind:      kind,
+			FileName:  u.FileName,
+			MimeType:  u.MimeType,
+			Size:      totalWritten,
+			SHA256:    shaFull[:16],
+			Storage:   u.Target,
+			PublicURL: publicURL,
+			ShareCode: shareCode,
 		}
-		clipItem, _ = s.store.AddFileClip("", kind, u.FileName, u.MimeType, totalWritten, shaFull[:16], localRel, sh.Code)
+		if u.Target == "local" {
+			newClip.LocalRel = storageKey
+		} else {
+			newClip.StorageKey = storageKey
+		}
+		clipItem, _ = s.store.AddStoredFileClip(newClip)
 		if clipItem != nil {
 			s.broadcast("clip.created", clipItem)
 		}
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]any{
-		"share":     sh,
-		"publicUrl": publicURL,
-		"clip":      clipItem,
+		"share":      sh,
+		"publicUrl":  publicURL,
+		"storageKey": storageKey,
+		"clip":       clipItem,
 	})
 }
 

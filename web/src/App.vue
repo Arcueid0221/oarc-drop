@@ -1,60 +1,59 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import AudioEngine from './components/AudioEngine.vue'
-import ClipboardView from './components/ClipboardView.vue'
-import DropView from './components/DropView.vue'
-import GalleryView from './components/GalleryView.vue'
+import HubView from './components/HubView.vue'
 import MusicView from './components/MusicView.vue'
 import PublicSharePortal from './components/PublicSharePortal.vue'
+import QrDialog from './components/QrDialog.vue'
 import SharesView from './components/SharesView.vue'
 import UiIcon from './components/UiIcon.vue'
+import VaultView from './components/VaultView.vue'
 import { formatBytes, useDropStore } from './composables/useDropStore'
 
 const store = useDropStore()
 
-type NavTab = 'drop' | 'clip' | 'gallery' | 'music' | 'shares'
+type NavTab = 'hub' | 'vault' | 'music' | 'shares'
 
 const navItems = computed<
   Array<{
     key: NavTab
     label: string
     shortLabel: string
-    icon: 'layers' | 'copy' | 'image' | 'disc' | 'link'
+    icon: 'layers' | 'folder' | 'disc' | 'link'
     badge?: string | number
   }>
 >(() => [
-  { key: 'drop', label: '快传投递', shortLabel: '快传', icon: 'layers' },
   {
-    key: 'clip',
-    label: '无损剪贴板',
-    shortLabel: '剪贴板',
-    icon: 'copy',
+    key: 'hub',
+    label: '收发台',
+    shortLabel: '收发',
+    icon: 'layers',
     badge: store.clips.value.length || undefined,
   },
   {
-    key: 'gallery',
-    label: 'Silo 画廊',
-    shortLabel: '画廊',
-    icon: 'image',
-    badge: store.imageCount.value || undefined,
+    key: 'vault',
+    label: '文件柜',
+    shortLabel: '文件柜',
+    icon: 'folder',
+    badge: store.siloObjects.value.length || store.imageCount.value || undefined,
   },
   {
     key: 'music',
-    label: 'Silo 音乐',
+    label: '音乐厅',
     shortLabel: '音乐',
     icon: 'disc',
     badge: store.audioCount.value || undefined,
   },
   {
     key: 'shares',
-    label: '分享管理',
-    shortLabel: '分享',
+    label: '外链管理',
+    shortLabel: '外链',
     icon: 'link',
     badge: store.shares.value.length || undefined,
   },
 ])
 
-const activeTab = ref<NavTab>('drop')
+const activeTab = ref<NavTab>('hub')
 const activeIdx = computed(() => Math.max(0, navItems.value.findIndex((i) => i.key === activeTab.value)))
 
 const theme = ref<'light' | 'dark'>(
@@ -112,8 +111,19 @@ async function onGlobalPaste(e: ClipboardEvent) {
   const files = e.clipboardData?.files
   if (files && files.length > 0) {
     e.preventDefault()
+    if (activeTab.value === 'hub') {
+      window.dispatchEvent(new CustomEvent('oarc-hub-files', { detail: Array.from(files) }))
+      return
+    }
+    const savedMode = (localStorage.getItem('oarc_hub_mode') || 'local') as 'local' | 'silo'
+    const savedPrefix = localStorage.getItem('oarc_imghost_prefix') || 'images/'
+    const savedFmt = (localStorage.getItem('oarc_imghost_fmt') || 'md') as 'md' | 'url'
     for (const f of Array.from(files)) {
-      await store.sendQuickPasteFile(f)
+      await store.sendQuickPasteFile(f, {
+        target: savedMode === 'silo' ? 'silo' : 'local',
+        prefix: savedMode === 'silo' ? savedPrefix : '',
+        autoCopyFormat: savedMode === 'silo' ? savedFmt : 'none',
+      })
     }
     return
   }
@@ -129,6 +139,7 @@ onMounted(() => {
   if (!shareCode.value) {
     void store.loadInitial()
     void store.loadMedia(false)
+    void store.loadMusicCatalog(false)
     stopSSE = store.connectSSE()
     window.addEventListener('paste', onGlobalPaste)
   }
@@ -200,8 +211,8 @@ onBeforeUnmount(() => {
             <UiIcon :name="item.icon" :size="16.5" />
             <span class="sb-nav-label">{{ item.label }}</span>
 
-            <!-- Live Upload % on Drop tab -->
-            <span v-if="item.key === 'drop' && activeUpload" class="sb-live-pill mono">
+            <!-- Live Upload % on Hub tab -->
+            <span v-if="item.key === 'hub' && activeUpload" class="sb-live-pill mono">
               {{ uploadPct }}%
             </span>
             <!-- Dancing Equalizer on Music tab when playing -->
@@ -304,9 +315,8 @@ onBeforeUnmount(() => {
       <!-- Right Equal-Height Scrollable Main Canvas -->
       <main class="macos-canvas">
         <Transition name="pane-fade" mode="out-in">
-          <DropView v-if="activeTab === 'drop'" key="drop" />
-          <ClipboardView v-else-if="activeTab === 'clip'" key="clip" />
-          <GalleryView v-else-if="activeTab === 'gallery'" key="gallery" />
+          <HubView v-if="activeTab === 'hub'" key="hub" />
+          <VaultView v-else-if="activeTab === 'vault'" key="vault" />
           <MusicView v-else-if="activeTab === 'music'" key="music" />
           <SharesView v-else key="shares" />
         </Transition>
@@ -343,7 +353,7 @@ onBeforeUnmount(() => {
         <div
           class="m-tab-indicator"
           :style="{
-            width: 'calc((100% - 10px) / 5)',
+            width: 'calc((100% - 10px) / 4)',
             transform: `translateX(${activeIdx * 100}%)`,
           }"
         />
@@ -362,6 +372,7 @@ onBeforeUnmount(() => {
     </div>
 
     <AudioEngine />
+    <QrDialog />
   </div>
 </template>
 
@@ -771,7 +782,7 @@ onBeforeUnmount(() => {
     pointer-events: auto;
     position: relative;
     display: grid;
-    grid-template-columns: repeat(5, 1fr);
+    grid-template-columns: repeat(4, 1fr);
     padding: 5px;
     border-radius: 999px;
   }

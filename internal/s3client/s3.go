@@ -169,6 +169,56 @@ func (c *Client) GetObject(ctx context.Context, key string, rangeHeader string, 
 	return resp, nil
 }
 
+func (c *Client) HeadObject(ctx context.Context, key string) (*ObjectInfo, error) {
+	req, err := c.newSignedRequest(ctx, http.MethodHead, key, nil, nil, 0, "")
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("s3 head %q status %d", key, resp.StatusCode)
+	}
+	var sz int64
+	fmt.Sscanf(resp.Header.Get("Content-Length"), "%d", &sz)
+	lm, _ := http.ParseTime(resp.Header.Get("Last-Modified"))
+	return &ObjectInfo{
+		Key:          key,
+		Size:         sz,
+		ETag:         strings.Trim(resp.Header.Get("ETag"), "\""),
+		LastModified: lm,
+	}, nil
+}
+
+func (c *Client) CopyObject(ctx context.Context, srcKey string, dstKey string) error {
+	cleanSrc := strings.TrimLeft(srcKey, "/")
+	copySource := "/" + s3EscapePath(c.cfg.Bucket) + "/" + s3EscapePath(cleanSrc)
+	extra := map[string]string{
+		"X-Amz-Copy-Source":        copySource,
+		"X-Amz-Metadata-Directive": "COPY",
+	}
+	req, err := c.newSignedRequestWithHeaders(ctx, http.MethodPut, dstKey, nil, nil, 0, "", extra)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+	resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 || bytes.Contains(body, []byte("<Error>")) {
+		return fmt.Errorf("s3 copy %q -> %q status %d: %s", srcKey, dstKey, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
 func (c *Client) PutObject(ctx context.Context, key string, body io.Reader, size int64, contentType string, cacheControl string) error {
 	extra := map[string]string{}
 	if cacheControl != "" {
@@ -358,8 +408,29 @@ func (c *Client) newSignedRequestWithHeaders(ctx context.Context, method string,
 	req.Header.Set("X-Amz-Content-Sha256", payloadHash)
 
 	signedHeaders := []string{"host", "x-amz-content-sha256", "x-amz-date"}
-	canonicalHeaders := fmt.Sprintf("host:%s\nx-amz-content-sha256:%s\nx-amz-date:%s\n",
-		c.endpoint.Host, payloadHash, amzDate)
+	hdrMap := map[string]string{
+		"host":                 c.endpoint.Host,
+		"x-amz-content-sha256": payloadHash,
+		"x-amz-date":           amzDate,
+	}
+	for k, v := range extraHeaders {
+		lk := strings.ToLower(k)
+		if strings.HasPrefix(lk, "x-amz-") && v != "" {
+			if _, exists := hdrMap[lk]; !exists {
+				signedHeaders = append(signedHeaders, lk)
+			}
+			hdrMap[lk] = strings.TrimSpace(v)
+		}
+	}
+	sort.Strings(signedHeaders)
+	var canonHdrBuf strings.Builder
+	for _, hk := range signedHeaders {
+		canonHdrBuf.WriteString(hk)
+		canonHdrBuf.WriteByte(':')
+		canonHdrBuf.WriteString(hdrMap[hk])
+		canonHdrBuf.WriteByte('\n')
+	}
+	canonicalHeaders := canonHdrBuf.String()
 
 	canonicalReq := strings.Join([]string{
 		method,
