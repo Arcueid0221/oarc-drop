@@ -121,8 +121,6 @@ func envOr(key, fallback string) string {
 
 func defaultHeaderLinks() []server.HeaderLink {
 	return []server.HeaderLink{
-		{Label: "Blog", URL: "https://arcueidblog.top"},
-		{Label: "Monitor", URL: "https://monitor.arcueidblog.top"},
-		{Label: "SIM", URL: "https://sim.arcueidblog.top"},
+		{Label: "博客", URL: "https://arcueidblog.top"},
 	}
 }

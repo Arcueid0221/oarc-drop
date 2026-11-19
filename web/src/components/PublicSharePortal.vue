@@ -130,10 +130,16 @@ onMounted(() => {
     >
       <!-- Ticket Top Header -->
       <header class="ticket-top">
-        <div class="t-brand">
+        <a
+          href="https://arcueidblog.top"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="t-brand"
+          title="访问 O.Arc 博客"
+        >
           <span class="t-serif">O.Arc</span>
           <span class="t-code mono">DROP</span>
-        </div>
+        </a>
         <span class="t-status mono" :class="{ 'is-locked': meta && !meta.unlocked }">
           {{ loading ? 'CHECKING' : errorMsg ? 'EXPIRED' : meta?.unlocked ? 'LOSSLESS READY' : 'PROTECTED' }}
         </span>
@@ -295,6 +301,8 @@ onMounted(() => {
   display: inline-flex;
   align-items: baseline;
   gap: 6px;
+  text-decoration: none;
+  color: inherit;
 }
 
 .t-serif {

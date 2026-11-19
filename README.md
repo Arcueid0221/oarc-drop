@@ -67,6 +67,8 @@ go run ./cmd/demo
 
 ## 发布记录
 
+- **2026-11-20 v1.5.3（导航收敛为博客中心辐射 · 公开取件单顶栏支持点回博客）**：
+  - 默认页头链接 `defaultHeaderLinks()` 收敛为仅保留「博客」（`https://arcueidblog.top`），与 `Monitor`、`SIMerald` 统一改为以博客公开前台为中心的单跳回链结构；免登公开取件页 `/s/{code}` 左上角 `O.Arc DROP` 品牌标同步改为点击跳转回博客。
 - **2026-11-19 v1.5.2（修复手机点击输入框白屏与一键剪贴板读取失败）**：
   - **修复手机点击输入框白屏无法输入**：移除 `interactive-widget=resizes-content`、`visualViewport` 根样式变量改写、弹窗键盘双扣以及安卓 Chrome 弹键盘时易跳过绘制的 `content-visibility: auto`，横屏媒体查询补齐 `orientation: landscape`；软键盘弹出时仅对悬浮底栏做 `opacity/visibility` 隐藏，绝不触碰页面几何布局，同时完整保留 `v1.5.1` 的安卓 120Hz 去嵌套毛玻璃与纯 GPU 进度条优化。
   - **修复移动端一键粘贴报剪贴板权限错误**：改为单次 `navigator.clipboard.read()` 内直接提取图片或 `text/plain`（避免二次调用 `readText()` 脱离用户手势被拒）；若浏览器安全策略本身禁用读取权限，自动聚焦输入框引导直接长按选「粘贴」（原生支持原图与文字）。
