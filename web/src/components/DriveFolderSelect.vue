@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { useDropStore } from '../composables/useDropStore'
+import { useBodyScrollLock } from '../composables/useMobileViewport'
 import UiIcon from './UiIcon.vue'
 
 const props = withDefaults(
@@ -28,9 +29,11 @@ const store = useDropStore()
 const triggerEl = ref<HTMLElement | null>(null)
 const menuEl = ref<HTMLElement | null>(null)
 const isOpen = ref(false)
+const isMobileOverlay = ref(false)
 const creating = ref(false)
 const newFolderDraft = ref('')
 const menuStyle = ref<Record<string, string>>({})
+useBodyScrollLock(computed(() => isOpen.value && isMobileOverlay.value))
 
 const savedFolder = computed(() => {
   if (!props.savedPath) return ''
@@ -57,12 +60,16 @@ const isHighlighted = computed(() =>
 function updatePosition() {
   const btn = triggerEl.value
   if (!btn) return
-  if (window.innerWidth <= 680) {
+  const compact =
+    window.innerWidth <= 720 ||
+    (window.innerHeight <= 520 && window.matchMedia('(pointer: coarse)').matches)
+  isMobileOverlay.value = compact
+  if (compact) {
     menuStyle.value = {
       position: 'fixed',
       left: 'max(14px, calc(env(safe-area-inset-left, 0px) + 14px))',
       right: 'max(14px, calc(env(safe-area-inset-right, 0px) + 14px))',
-      top: 'max(74px, calc(env(safe-area-inset-top, 0px) + 22px))',
+      top: 'max(66px, calc(env(safe-area-inset-top, 0px) + 18px))',
     }
     return
   }
@@ -175,60 +182,79 @@ onBeforeUnmount(() => {
 
   <Teleport to="body">
     <Transition name="pop-drop">
-      <div v-if="isOpen" ref="menuEl" class="liquid-chrome drive-pop" :style="menuStyle" @click.stop>
-        <div class="dp-head mono">GOOGLE DRIVE · OArc-Drop</div>
+      <div v-if="isOpen" class="dp-layer">
+        <div
+          v-if="isMobileOverlay"
+          class="dp-backdrop"
+          @click.stop="closeMenu"
+        />
+        <div ref="menuEl" class="liquid-chrome drive-pop" :style="menuStyle" @click.stop>
+          <div class="dp-head-row">
+            <div class="dp-head mono">GOOGLE DRIVE · OArc-Drop</div>
+            <button
+              v-if="isMobileOverlay"
+              type="button"
+              class="dp-close-btn"
+              aria-label="关闭目录选择"
+              @click="closeMenu"
+            >
+              <UiIcon name="close" :size="13.5" />
+            </button>
+          </div>
 
-        <div class="dp-list">
-          <button
-            v-if="mode === 'preset'"
-            type="button"
-            class="dp-item"
-            :class="{ 'is-cur': !presetValue }"
-            @click="pickFolder('')"
-          >
-            <span>不直传（默认私密互传）</span>
-            <UiIcon v-if="!presetValue" name="check" :size="13" />
-          </button>
+          <div class="dp-list">
+            <button
+              v-if="mode === 'preset'"
+              type="button"
+              class="dp-item"
+              :class="{ 'is-cur': !presetValue }"
+              @click="pickFolder('')"
+            >
+              <span>不直传（默认私密互传）</span>
+              <UiIcon v-if="!presetValue" name="check" :size="13" />
+            </button>
 
-          <button
-            v-for="f in store.gdriveFolders.value"
-            :key="f"
-            type="button"
-            class="dp-item"
-            :class="{
-              'is-cur': mode === 'preset' ? presetValue === f : savedFolder === f && Boolean(savedPath),
-            }"
-            @click="pickFolder(f)"
-          >
-            <span class="dp-item-l">
-              <UiIcon name="folder" :size="13.5" />
-              <span class="mono">{{ f === '/' ? '/ (根目录)' : f }}</span>
-            </span>
-            <UiIcon
-              v-if="mode === 'preset' ? presetValue === f : savedFolder === f && Boolean(savedPath)"
-              name="check"
-              :size="13"
+            <button
+              v-for="f in store.gdriveFolders.value"
+              :key="f"
+              type="button"
+              class="dp-item"
+              :class="{
+                'is-cur': mode === 'preset' ? presetValue === f : savedFolder === f && Boolean(savedPath),
+              }"
+              @click="pickFolder(f)"
+            >
+              <span class="dp-item-l">
+                <UiIcon name="folder" :size="13.5" />
+                <span class="mono">{{ f === '/' ? '/ (根目录)' : f }}</span>
+              </span>
+              <UiIcon
+                v-if="mode === 'preset' ? presetValue === f : savedFolder === f && Boolean(savedPath)"
+                name="check"
+                :size="13"
+              />
+            </button>
+          </div>
+
+          <form class="dp-create" @submit.prevent="submitNewFolder">
+            <input
+              v-model="newFolderDraft"
+              placeholder="+ 新建子文件夹…"
+              class="dp-input"
+              enterkeyhint="done"
+              :disabled="creating"
             />
-          </button>
+            <button
+              v-if="newFolderDraft.trim() || creating"
+              type="submit"
+              class="dp-add-btn"
+              :disabled="creating"
+            >
+              <UiIcon v-if="creating" name="spinner" :size="12.5" class="spin-anim" />
+              <span>{{ creating ? '创建中' : '新建' }}</span>
+            </button>
+          </form>
         </div>
-
-        <form class="dp-create" @submit.prevent="submitNewFolder">
-          <input
-            v-model="newFolderDraft"
-            placeholder="+ 新建子文件夹…"
-            class="dp-input"
-            :disabled="creating"
-          />
-          <button
-            v-if="newFolderDraft.trim() || creating"
-            type="submit"
-            class="dp-add-btn"
-            :disabled="creating"
-          >
-            <UiIcon v-if="creating" name="spinner" :size="12.5" class="spin-anim" />
-            <span>{{ creating ? '创建中' : '新建' }}</span>
-          </button>
-        </form>
       </div>
     </Transition>
   </Teleport>
@@ -256,6 +282,15 @@ onBeforeUnmount(() => {
   transform: rotate(180deg);
 }
 
+.dp-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9994;
+  background: rgba(11, 13, 17, 0.36);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+}
+
 .drive-pop {
   z-index: 9995;
   border-radius: 13px;
@@ -263,6 +298,26 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  overscroll-behavior: contain;
+}
+
+.dp-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dp-close-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 0;
+  background: var(--surface-recessed);
+  color: var(--ink-2);
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
 }
 
 .dp-head {
@@ -276,6 +331,8 @@ onBeforeUnmount(() => {
 .dp-list {
   max-height: 188px;
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   display: flex;
   flex-direction: column;
   gap: 2px;
@@ -357,15 +414,33 @@ onBeforeUnmount(() => {
   gap: 4px;
 }
 
-@media (max-width: 680px) {
+@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+  .drive-sel-btn {
+    height: 36px;
+    padding: 0 11px;
+    font-size: 0.79rem;
+  }
+  .drive-pop {
+    padding: 10px;
+    border-radius: 16px;
+    gap: 6px;
+  }
+  .dp-list {
+    max-height: min(220px, calc(var(--vv-height, 100dvh) - 180px));
+  }
+  .dp-item {
+    min-height: 40px;
+    padding: 9px 11px;
+    font-size: 0.84rem;
+  }
   .dp-input {
-    height: 35px;
+    height: 38px;
     font-size: 16px;
   }
   .dp-add-btn {
-    height: 35px;
-    padding: 0 12px;
-    font-size: 0.8rem;
+    height: 38px;
+    padding: 0 13px;
+    font-size: 0.82rem;
   }
 }
 

@@ -2,17 +2,32 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
     <meta name="robots" content="noindex, nofollow" />
+    <meta name="format-detection" content="telephone=no, email=no, address=no" />
+    <meta name="color-scheme" content="light dark" />
     <meta name="theme-color" content="#e8eaef" id="oarc-theme-color" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" id="oarc-ios-status-bar" />
     <meta name="apple-mobile-web-app-title" content="O.Arc DROP" />
     <title>O.Arc DROP</title>
-    <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png?v=140" />
-    <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/assets/apple-touch-icon.png?v=140" />
-    <link rel="manifest" href="/assets/manifest.webmanifest?v=140" />
+    <script>
+      ;(function () {
+        try {
+          var t = localStorage.getItem('oarc_drop_theme') === 'dark' ? 'dark' : 'light'
+          document.documentElement.setAttribute('data-theme', t)
+          document.documentElement.style.colorScheme = t
+          var mc = document.getElementById('oarc-theme-color')
+          if (mc) mc.setAttribute('content', t === 'dark' ? '#08090b' : '#e8eaef')
+          var sb = document.getElementById('oarc-ios-status-bar')
+          if (sb) sb.setAttribute('content', t === 'dark' ? 'black-translucent' : 'default')
+        } catch (e) {}
+      })()
+    </script>
+    <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png?v=150" />
+    <link rel="apple-touch-icon-precomposed" sizes="180x180" href="/assets/apple-touch-icon.png?v=150" />
+    <link rel="manifest" href="/assets/manifest.webmanifest?v=150" />
     <link
       rel="icon"
       type="image/svg+xml"

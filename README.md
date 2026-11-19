@@ -67,6 +67,10 @@ go run ./cmd/demo
 
 ## 发布记录
 
+- **2026-11-19 v1.5.0（iPhone Air & 安卓手机端深度全栈适配）**：
+  - **PWA 壳层、状态栏与安卓防裁切图标**：修复浅色模式下 iPhone Air 主屏 PWA 状态栏白字隐身（补齐首帧防闪白脚本与 `color-scheme` 同步），禁止数字自动识别为电话链接；后端新增免登录 `/assets/icon-192.png` 与带 80% 安全区的 `/assets/icon-512-maskable.png`（适配安卓圆形/水滴自适应图标）；补齐 `interactive-widget=resizes-content`。
+  - **软键盘避让与原生级触屏体验**：新增 `useMobileViewport` 监听 `visualViewport`，软键盘弹出时自动隐藏底栏、迷你播放器与多选坞，并向底部抽屉注入 iOS `--kb-inset` 防遮挡输入框；横屏（含 iPhone Air `912×420pt`）统一走移动端紧凑布局；校准底栏指示条偏移、增加角标/在线状态点与点击回顶；去除触屏灰块闪动、隔离桌面 `:hover` 防粘滞、弹窗锁定底层滚动防穿透。
+  - **iOS 剪贴板、系统原生分享与页面全量扫雷**：修复 iOS Safari「复制原图」因异步脱离手势必报错（同步传入 `ClipboardItem` Promise）及剪贴板回退误弹键盘；分享弹窗与外链管理接入 Web Share API 一键调起系统分享；文件柜手机端双列网格去遮挡、预览升级为全功能底部抽屉（含分享码、重命名、删除闭环）；音乐厅精简手机顶栏、搜歌弹键盘自动折叠唱盘、加大进度条热区并支持歌词窗展开/收起、补齐锁屏 `MediaSession` 进度同步与拖拽；收发台两行上传进度条、重命名保存/取消按钮、视频 `playsinline` 与 PDF 新窗打开；修复公开取件页 `/s/{code}` 的 SHA-256 在窄屏撑破横向滚动条并关闭触屏 3D 卡斜。
 - **2026-11-19 v1.4.0（iOS 桌面图标与灵动岛全屏适配 · 文件夹增删 · 跨容器复制/移动与多选批量管理）**：
   - **手机桌面图标、灵动岛与主屏全屏适配**：纯 Go 实时合成 `180×180`（iPhone `@3x` 主屏幕圆角安全区全出血）与 `512×512` 器材风应用图标及 `manifest.webmanifest`，挂载于 `/assets/*` 免登录直出以兼容 Cloudflare Access 下的 iOS「添加到主屏幕」抓取；补齐 `apple-mobile-web-app-capable`、随深浅主题切换的状态栏底色与四向 `env(safe-area-inset-*)` 灵动岛避让。
   - **修复手机端无法新建 Google Drive 子目录**：定位并修复 iOS Safari 软键盘弹出触发全局 `resize` / `scroll` 导致下拉框闪退关闭的问题，移动端改为上半屏安全定位与 `16px` 防自动缩放输入框。

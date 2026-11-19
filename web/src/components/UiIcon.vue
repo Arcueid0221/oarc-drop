@@ -48,6 +48,9 @@ withDefaults(
       | 'folder-plus'
       | 'move'
       | 'check-square'
+      | 'share-ios'
+      | 'chevron-up'
+      | 'more-h'
     size?: number
   }>(),
   { size: 16 },
@@ -269,6 +272,19 @@ withDefaults(
     <template v-else-if="name === 'check-square'">
       <rect width="18" height="18" x="3" y="3" rx="3.5" />
       <path d="m8.5 12.3 2.3 2.3 4.8-4.8" />
+    </template>
+    <template v-else-if="name === 'share-ios'">
+      <path d="M12 3v12" />
+      <path d="m7.5 7.5 4.5-4.5 4.5 4.5" />
+      <path d="M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6" />
+    </template>
+    <template v-else-if="name === 'chevron-up'">
+      <path d="m18 15-6-6-6 6" />
+    </template>
+    <template v-else-if="name === 'more-h'">
+      <circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none" />
+      <circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none" />
     </template>
   </svg>
 </template>

@@ -7,11 +7,15 @@ import {
   shareFullUrl,
   useDropStore,
 } from '../composables/useDropStore'
+import { useMobileViewport } from '../composables/useMobileViewport'
 import type { MediaItem } from '../types'
 import UiIcon from './UiIcon.vue'
 
 const store = useDropStore()
+const { isKeyboardOpen } = useMobileViewport()
 const search = ref('')
+const searchFocused = ref(false)
+const lyricsExpanded = ref(false)
 const selectedPlaylistId = ref<number | 'all'>('all')
 const lyricsContainer = ref<HTMLElement | null>(null)
 const trackScrollEl = ref<HTMLElement | null>(null)
@@ -67,6 +71,17 @@ const filteredTracks = computed(() => {
     return hay.includes(q)
   })
 })
+
+const displayTracks = computed(() =>
+  filteredTracks.value.map((track) => ({
+    track,
+    info: parseTrackDisplayName(track, store.catalogTracks.value),
+  })),
+)
+
+const isDeckCollapsedForSearch = computed(
+  () => isKeyboardOpen.value || (searchFocused.value && Boolean(search.value.trim())),
+)
 
 // Synchronously knows whether the active track carries lyrics (zero fetch flicker between two lyric songs!)
 const hasLyricStage = computed(() => {
@@ -266,7 +281,7 @@ const playModeLabel = computed(() => {
     <!-- TOP FIXED STUDIO DECK (Turntable + Transport + Integrated Centered Lyrics + Playlist Strip) -->
     <div class="music-top-fixed">
       <header class="pane-header music-header">
-        <div class="pane-title-wrap">
+        <div class="pane-title-wrap music-title-wrap">
           <h1 class="pane-title">音乐厅</h1>
           <span class="pane-count">{{ store.audioCount.value }}</span>
         </div>
@@ -274,12 +289,27 @@ const playModeLabel = computed(() => {
         <div class="pane-actions search-bar-wrap">
           <div class="search-pill">
             <UiIcon name="search" :size="14" />
-            <input v-model="search" placeholder="搜索歌手、歌名…" />
+            <input
+              v-model="search"
+              placeholder="搜索歌手、歌名…"
+              enterkeyhint="search"
+              @focus="searchFocused = true"
+              @blur="searchFocused = false"
+            />
+            <button
+              v-if="search"
+              type="button"
+              class="m-search-clear"
+              aria-label="清空搜索"
+              @click="search = ''"
+            >
+              <UiIcon name="close" :size="12" />
+            </button>
           </div>
           <button
             v-if="store.currentTrack.value"
             type="button"
-            class="pill-btn"
+            class="pill-btn m-locate-btn"
             title="在下方列表居中定位正在播放的歌曲"
             @click="scrollToPlayingTrack"
           >
@@ -292,13 +322,14 @@ const playModeLabel = computed(() => {
         </div>
       </header>
 
-      <div class="music-fixed-inner">
+      <div class="music-fixed-inner" :class="{ 'is-search-compact': isDeckCollapsedForSearch }">
         <!-- Unified Constant-Height Studio Deck (Lyrics fused inside, spring rebound on lyric <-> instrumental!) -->
         <section
           class="glass-box studio-deck"
           :class="[
             hasLyricStage ? 'has-lyrics' : 'no-lyrics',
             reboundState !== 'none' ? `rebound-${reboundState}` : '',
+            { 'is-lyrics-expanded': lyricsExpanded },
           ]"
         >
           <!-- Left: Platter + Track Info + Tick Scrubber + Tactile Transport -->
@@ -366,6 +397,7 @@ const playModeLabel = computed(() => {
                 <div
                   ref="scrubEl"
                   class="jelly-scrubber"
+                  :class="{ 'is-scrubbing': isScrubbing }"
                   :style="{
                     transform: `translateX(${jellyStretch}px) scaleX(${1 + Math.abs(jellyStretch) * 0.0035})`,
                   }"
@@ -376,6 +408,7 @@ const playModeLabel = computed(() => {
                 >
                   <div class="scrub-track">
                     <div class="scrub-fill" :style="{ width: `${progressRatio * 100}%` }" />
+                    <span class="scrub-thumb" :style="{ left: `${progressRatio * 100}%` }" />
                   </div>
                   <div class="scrub-ruler-row mono">
                     <span>{{ fmtSec(displayedProgressSec) }}</span>
@@ -436,6 +469,16 @@ const playModeLabel = computed(() => {
 
           <!-- Right: Built-In Centered Lyric Stage (seamlessly fused into the top deck!) -->
           <div v-if="hasLyricStage" class="deck-lyric-pane">
+            <button
+              type="button"
+              class="lyric-expand-btn"
+              :title="lyricsExpanded ? '收起歌词窗' : '展开歌词窗'"
+              :aria-label="lyricsExpanded ? '收起歌词窗' : '展开歌词窗'"
+              @click="lyricsExpanded = !lyricsExpanded"
+            >
+              <UiIcon :name="lyricsExpanded ? 'chevron-up' : 'chevron-down'" :size="13" />
+              <span>{{ lyricsExpanded ? '收起' : '展开歌词' }}</span>
+            </button>
             <div ref="lyricsContainer" class="lyric-scroll-box">
               <div class="lyric-spacer" aria-hidden="true" />
               <div v-if="store.currentLyrics.value.length === 0" class="lrc-loading mono">
@@ -496,7 +539,7 @@ const playModeLabel = computed(() => {
 
         <div v-else class="track-list">
           <div
-            v-for="(tr, idx) in filteredTracks"
+            v-for="({ track: tr, info }, idx) in displayTracks"
             :key="tr.key"
             class="glass-box track-row"
             :class="{ 'is-playing': store.currentTrack.value?.key === tr.key }"
@@ -517,8 +560,8 @@ const playModeLabel = computed(() => {
             </button>
 
             <img
-              v-if="parseTrackDisplayName(tr, store.catalogTracks.value).coverUrl"
-              :src="parseTrackDisplayName(tr, store.catalogTracks.value).coverUrl"
+              v-if="info.coverUrl"
+              :src="info.coverUrl"
               class="tr-cover"
               alt=""
               loading="lazy"
@@ -529,14 +572,12 @@ const playModeLabel = computed(() => {
 
             <div class="tr-meta">
               <div class="tr-title">
-                <span>{{ parseTrackDisplayName(tr, store.catalogTracks.value).title }}</span>
+                <span>{{ info.title }}</span>
                 <span v-if="tr.lyricsKey" class="lrc-badge mono">LRC</span>
               </div>
               <div class="tr-sub">
-                {{ parseTrackDisplayName(tr, store.catalogTracks.value).artist }}
-                <template v-if="parseTrackDisplayName(tr, store.catalogTracks.value?.album ? store.catalogTracks.value : store.catalogTracks.value).album">
-                  · {{ parseTrackDisplayName(tr, store.catalogTracks.value).album }}
-                </template>
+                {{ info.artist }}
+                <template v-if="info.album"> · {{ info.album }}</template>
                 <span class="mono"> · {{ formatBytes(tr.size) }}</span>
               </div>
             </div>
@@ -857,23 +898,58 @@ const playModeLabel = computed(() => {
 
 /* Precision Scrubber + Hardware Micro-Ruler */
 .jelly-scrubber {
-  margin-top: 2px;
+  margin-top: 0;
+  padding: 8px 0 2px;
   cursor: pointer;
   user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
   touch-action: none;
 }
 
 .scrub-track {
+  position: relative;
   height: 5px;
   border-radius: 999px;
   background: var(--surface-recessed-hover);
-  overflow: hidden;
 }
 
 .scrub-fill {
   height: 100%;
   background: var(--cta-bg);
   border-radius: 999px;
+}
+
+.scrub-thumb {
+  position: absolute;
+  top: 50%;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--cta-bg);
+  border: 2px solid var(--surface-pill);
+  box-shadow: 0 2px 6px rgba(11, 13, 17, 0.25);
+  transform: translate(-50%, -50%) scale(0.85);
+  transition: transform 0.16s var(--ease-spring);
+  pointer-events: none;
+}
+
+.jelly-scrubber.is-scrubbing .scrub-thumb {
+  transform: translate(-50%, -50%) scale(1.32);
+}
+
+.m-search-clear {
+  border: 0;
+  background: transparent;
+  color: var(--ink-3);
+  padding: 4px;
+  display: inline-grid;
+  place-items: center;
+  cursor: pointer;
+}
+
+.lyric-expand-btn {
+  display: none;
 }
 
 .scrub-ruler-row {
@@ -990,6 +1066,8 @@ const playModeLabel = computed(() => {
   width: 100%;
   height: 152px;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -1074,6 +1152,8 @@ const playModeLabel = computed(() => {
   align-items: center;
   gap: 6px;
   overflow-x: auto;
+  overscroll-behavior-x: contain;
+  -webkit-overflow-scrolling: touch;
   padding-bottom: 2px;
   scrollbar-width: none;
 }
@@ -1128,6 +1208,7 @@ const playModeLabel = computed(() => {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
 
@@ -1274,15 +1355,40 @@ const playModeLabel = computed(() => {
   border-color: var(--border-strong);
 }
 
-@media (max-width: 860px) {
+@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+  .music-header {
+    padding: 8px 14px 6px;
+  }
+
+  .music-title-wrap {
+    display: none;
+  }
+
+  .search-bar-wrap {
+    width: 100%;
+    gap: 7px;
+  }
+
+  .m-locate-btn {
+    width: 38px;
+    padding: 0;
+  }
+
   .music-fixed-inner {
-    padding: 0 14px 10px;
+    padding: 0 14px 8px;
+    gap: 8px;
+  }
+
+  /* Collapse bulky turntable while keyboard/search is active so search results never vanish on Android/iPhone */
+  .music-fixed-inner.is-search-compact .studio-deck {
+    display: none;
   }
 
   .studio-deck {
     min-height: auto;
-    padding: 12px 13px;
-    gap: 10px;
+    padding: 11px 12px;
+    gap: 8px;
+    border-radius: 16px;
   }
 
   .studio-deck.has-lyrics {
@@ -1290,27 +1396,66 @@ const playModeLabel = computed(() => {
   }
 
   .turntable-unit {
-    grid-template-columns: 84px minmax(0, 1fr);
-    gap: 12px;
+    grid-template-columns: 74px minmax(0, 1fr);
+    gap: 11px;
   }
 
   .platter-box {
-    width: 82px;
-    height: 82px;
+    width: 74px;
+    height: 74px;
   }
 
   .vinyl-platter {
-    width: 78px;
-    height: 78px;
+    width: 70px;
+    height: 70px;
   }
 
   .vinyl-label {
-    width: 38px;
-    height: 38px;
+    width: 34px;
+    height: 34px;
   }
 
   .tonearm {
     display: none;
+  }
+
+  .deck-title {
+    font-size: 0.94rem;
+  }
+
+  .jelly-scrubber {
+    padding: 10px 0 2px;
+  }
+
+  .scrub-track {
+    height: 6px;
+  }
+
+  .scrub-thumb {
+    width: 14px;
+    height: 14px;
+    transform: translate(-50%, -50%) scale(1);
+  }
+
+  .deck-transport {
+    flex-wrap: nowrap;
+    justify-content: space-between;
+    gap: 6px;
+    margin-top: 2px;
+  }
+
+  .mode-pill {
+    height: 36px;
+    padding: 0 9px;
+    font-size: 0.74rem;
+  }
+
+  .play-main-btn {
+    flex: 1;
+    max-width: 118px;
+    height: 38px;
+    padding: 0 12px;
+    font-size: 0.82rem;
   }
 
   .deck-lyric-pane {
@@ -1318,21 +1463,93 @@ const playModeLabel = computed(() => {
     padding-top: 8px;
     border-left: 0;
     border-top: 1px solid var(--border-hairline);
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .lyric-expand-btn {
+    position: absolute;
+    top: 6px;
+    right: 0;
+    z-index: 2;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    height: 24px;
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border-hairline);
+    background: var(--surface-card);
+    color: var(--ink-2);
+    font-size: 0.67rem;
+    font-weight: 590;
+    cursor: pointer;
   }
 
   .lyric-scroll-box {
-    height: 76px;
+    height: 70px;
+    transition: height 0.28s var(--ease-spring);
+  }
+
+  .studio-deck.is-lyrics-expanded .lyric-scroll-box {
+    height: 196px;
   }
 
   .lyric-spacer {
-    height: 26px;
+    height: 24px;
+  }
+
+  .studio-deck.is-lyrics-expanded .lyric-spacer {
+    height: 76px;
+  }
+
+  .pl-chip {
+    height: 34px;
+    padding: 0 11px;
+    font-size: 0.78rem;
   }
 
   .track-scroll-inner {
-    padding: 10px 14px 20px;
+    padding: 8px 14px 20px;
+  }
+
+  .track-row {
+    padding: 9px 10px;
+    gap: 9px;
+  }
+
+  .mini-key {
+    width: 35px;
+    height: 35px;
+    border-radius: 9px;
   }
 
   .hide-xs {
+    display: none;
+  }
+}
+
+@media (max-height: 520px) and (pointer: coarse) {
+  .studio-deck {
+    padding: 8px 11px;
+  }
+  .turntable-unit {
+    grid-template-columns: 56px minmax(0, 1fr);
+    gap: 10px;
+  }
+  .platter-box {
+    width: 56px;
+    height: 56px;
+  }
+  .vinyl-platter {
+    width: 54px;
+    height: 54px;
+  }
+  .vinyl-label {
+    width: 26px;
+    height: 26px;
+  }
+  .deck-lyric-pane {
     display: none;
   }
 }

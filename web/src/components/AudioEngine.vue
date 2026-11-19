@@ -37,11 +37,31 @@ function stepTrack(delta: number, fromEnded = false) {
   if (next) void store.playTrack(next)
 }
 
+function syncPositionState() {
+  if (!('mediaSession' in navigator) || typeof navigator.mediaSession.setPositionState !== 'function') {
+    return
+  }
+  const el = audioEl.value
+  if (!el || !Number.isFinite(el.duration) || el.duration <= 0) return
+  try {
+    navigator.mediaSession.setPositionState({
+      duration: el.duration,
+      playbackRate: el.playbackRate || 1,
+      position: Math.min(el.duration, Math.max(0, el.currentTime || 0)),
+    })
+  } catch {
+    // Some browsers reject position updates during transient loading states
+  }
+}
+
 function syncMediaSession() {
   if (!('mediaSession' in navigator) || !store.currentTrack.value) return
   const meta = store.currentMeta.value
   const artwork = store.currentCoverUrl.value
-    ? [{ src: store.currentCoverUrl.value, sizes: '512x512' }]
+    ? [
+        { src: store.currentCoverUrl.value, sizes: '256x256' },
+        { src: store.currentCoverUrl.value, sizes: '512x512' },
+      ]
     : []
   navigator.mediaSession.metadata = new MediaMetadata({
     title: meta?.title || store.currentTrack.value.name,
@@ -49,6 +69,7 @@ function syncMediaSession() {
     album: meta?.album || 'Aurora Silo',
     artwork,
   })
+  syncPositionState()
 }
 
 function onToggleEvent() {
@@ -72,6 +93,7 @@ function onSeekEvent(e: Event) {
   if (audioEl.value && Number.isFinite(sec)) {
     audioEl.value.currentTime = sec
     store.audioProgress.value = sec
+    syncPositionState()
   }
 }
 
@@ -80,6 +102,39 @@ function onVolumeEvent(e: Event) {
   if (audioEl.value && Number.isFinite(v)) {
     audioEl.value.volume = Math.min(1, Math.max(0, v))
   }
+}
+
+let lastPosSyncMs = 0
+
+function onTimeUpdate() {
+  const cur = audioEl.value?.currentTime || 0
+  store.audioProgress.value = cur
+  const now = performance.now()
+  if (now - lastPosSyncMs > 4000) {
+    lastPosSyncMs = now
+    syncPositionState()
+  }
+}
+
+function onAudioPlay() {
+  store.isPlaying.value = true
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.playbackState = 'playing'
+  }
+  syncPositionState()
+}
+
+function onAudioPause() {
+  store.isPlaying.value = false
+  if ('mediaSession' in navigator) {
+    navigator.mediaSession.playbackState = 'paused'
+  }
+  syncPositionState()
+}
+
+function onLoadedMetadata() {
+  store.audioDuration.value = audioEl.value?.duration || 0
+  syncPositionState()
 }
 
 watch(
@@ -116,10 +171,39 @@ onMounted(() => {
   window.addEventListener('oarc-audio-volume', onVolumeEvent)
 
   if ('mediaSession' in navigator) {
-    navigator.mediaSession.setActionHandler('play', () => void audioEl.value?.play())
-    navigator.mediaSession.setActionHandler('pause', () => audioEl.value?.pause())
-    navigator.mediaSession.setActionHandler('previoustrack', () => stepTrack(-1, false))
-    navigator.mediaSession.setActionHandler('nexttrack', () => stepTrack(1, false))
+    const safeHandle = (action: MediaSessionAction, fn: MediaSessionActionHandler) => {
+      try {
+        navigator.mediaSession.setActionHandler(action, fn)
+      } catch {
+        // unsupported action on this platform
+      }
+    }
+    safeHandle('play', () => void audioEl.value?.play())
+    safeHandle('pause', () => audioEl.value?.pause())
+    safeHandle('previoustrack', () => stepTrack(-1, false))
+    safeHandle('nexttrack', () => stepTrack(1, false))
+    safeHandle('seekto', (details) => {
+      if (audioEl.value && typeof details.seekTime === 'number' && Number.isFinite(details.seekTime)) {
+        audioEl.value.currentTime = details.seekTime
+        store.audioProgress.value = details.seekTime
+        syncPositionState()
+      }
+    })
+    safeHandle('seekbackward', (details) => {
+      if (!audioEl.value) return
+      const offset = details.seekOffset || 10
+      audioEl.value.currentTime = Math.max(0, audioEl.value.currentTime - offset)
+      store.audioProgress.value = audioEl.value.currentTime
+      syncPositionState()
+    })
+    safeHandle('seekforward', (details) => {
+      if (!audioEl.value) return
+      const offset = details.seekOffset || 10
+      const dur = audioEl.value.duration || Infinity
+      audioEl.value.currentTime = Math.min(dur, audioEl.value.currentTime + offset)
+      store.audioProgress.value = audioEl.value.currentTime
+      syncPositionState()
+    })
   }
 })
 
@@ -136,10 +220,10 @@ onBeforeUnmount(() => {
   <audio
     ref="audioEl"
     preload="metadata"
-    @play="store.isPlaying.value = true"
-    @pause="store.isPlaying.value = false"
-    @timeupdate="store.audioProgress.value = audioEl?.currentTime || 0"
-    @loadedmetadata="store.audioDuration.value = audioEl?.duration || 0"
+    @play="onAudioPlay"
+    @pause="onAudioPause"
+    @timeupdate="onTimeUpdate"
+    @loadedmetadata="onLoadedMetadata"
     @ended="stepTrack(1, true)"
   />
 </template>

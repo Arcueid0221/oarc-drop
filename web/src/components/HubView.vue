@@ -10,6 +10,7 @@ import {
   showToast,
   useDropStore,
 } from '../composables/useDropStore'
+import { useBodyScrollLock, useMobileViewport } from '../composables/useMobileViewport'
 import type { ClipItem } from '../types'
 import CopyPill from './CopyPill.vue'
 import DriveFolderSelect from './DriveFolderSelect.vue'
@@ -17,6 +18,7 @@ import MorphDeleteBtn from './MorphDeleteBtn.vue'
 import UiIcon from './UiIcon.vue'
 
 const store = useDropStore()
+const { isCoarsePointer } = useMobileViewport()
 
 const draftText = ref('')
 const sendState = ref<'idle' | 'loading' | 'success'>('idle')
@@ -44,6 +46,13 @@ const streamFilter = ref<'all' | 'file' | 'image' | 'text'>('all')
 const expandedIds = ref<Record<string, boolean>>({})
 const inlinePreviewIds = ref<Record<string, boolean>>({})
 const lightboxClip = ref<ClipItem | null>(null)
+useBodyScrollLock(computed(() => Boolean(lightboxClip.value)))
+
+const composerPlaceholder = computed(() =>
+  isCoarsePointer.value
+    ? '输入文字、长按粘贴，或点下方选取文件/照片（默认私密互传）…'
+    : '按 ⌘V 粘贴文件、原图或文字，或直接将文件拖入此处（默认私密互传）…',
+)
 
 const unpinnedCount = computed(() => store.clips.value.filter((c) => !c.pinned).length)
 
@@ -208,8 +217,13 @@ async function startInlineRename(item: ClipItem) {
   }
 }
 
+function cancelInlineRename() {
+  editingClipId.value = ''
+  editingNameDraft.value = ''
+}
+
 async function commitInlineRename(item: ClipItem) {
-  if (renamingClipBusy.value) return
+  if (renamingClipBusy.value || editingClipId.value !== item.id) return
   const draft = editingNameDraft.value.trim()
   if (!draft || draft === item.fileName) {
     editingClipId.value = ''
@@ -447,7 +461,7 @@ onBeforeUnmount(() => {
             v-model="draftText"
             rows="3"
             class="paste-input"
-            placeholder="按 ⌘V 粘贴文件、原图或文字，或直接将文件拖入此处（默认私密互传）…"
+            :placeholder="composerPlaceholder"
             @keydown="handleComposerKey"
             @paste="handleComposerPaste"
           />
@@ -511,13 +525,33 @@ onBeforeUnmount(() => {
           :class="{ 'is-error': u.status === 'error' }"
         >
           <div class="up-top">
-            <UiIcon
-              v-if="u.status === 'uploading' || u.status === 'assembling'"
-              name="spinner"
-              :size="14"
-              class="spin-anim up-spin"
-            />
-            <span class="up-name">{{ u.fileName }}</span>
+            <div class="up-head-main">
+              <UiIcon
+                v-if="u.status === 'uploading' || u.status === 'assembling'"
+                name="spinner"
+                :size="14"
+                class="spin-anim up-spin"
+              />
+              <span class="up-name">{{ u.fileName }}</span>
+              <button
+                v-if="u.status === 'uploading'"
+                type="button"
+                class="icon-circle-btn up-cancel up-cancel--mobile"
+                title="取消上传"
+                @click="u.abortCtrl.abort()"
+              >
+                <UiIcon name="close" :size="12.5" />
+              </button>
+              <button
+                v-else-if="u.status === 'error'"
+                type="button"
+                class="icon-circle-btn up-cancel up-cancel--mobile"
+                title="关闭此提示"
+                @click="store.dismissUpload(u.localId)"
+              >
+                <UiIcon name="close" :size="12.5" />
+              </button>
+            </div>
             <span class="up-stat mono" :class="{ 'is-err-txt': u.status === 'error' }">
               <template v-if="u.status === 'uploading'">
                 {{ u.size ? Math.min(100, Math.round((u.uploadedBytes / u.size) * 100)) : 0 }}% ·
@@ -530,7 +564,7 @@ onBeforeUnmount(() => {
             <button
               v-if="u.status === 'uploading'"
               type="button"
-              class="icon-circle-btn up-cancel"
+              class="icon-circle-btn up-cancel up-cancel--desk"
               title="取消上传"
               @click="u.abortCtrl.abort()"
             >
@@ -539,7 +573,7 @@ onBeforeUnmount(() => {
             <button
               v-else-if="u.status === 'error'"
               type="button"
-              class="icon-circle-btn up-cancel"
+              class="icon-circle-btn up-cancel up-cancel--desk"
               title="关闭此提示"
               @click="store.dismissUpload(u.localId)"
             >
@@ -563,7 +597,11 @@ onBeforeUnmount(() => {
 
       <!-- Empty State -->
       <div v-if="filteredClips.length === 0" class="glass-box empty-state">
-        暂无互传内容 · 在上方按 ⌘V 或选择文件即可跨设备同步
+        {{
+          isCoarsePointer
+            ? '暂无互传内容 · 在上方输入文字、选择文件或粘贴剪贴板即可跨设备同步'
+            : '暂无互传内容 · 在上方按 ⌘V 或选择文件即可跨设备同步'
+        }}
       </div>
 
       <!-- FILE-CENTRIC PRIVATE STREAM -->
@@ -660,10 +698,33 @@ onBeforeUnmount(() => {
                         v-model="editingNameDraft"
                         :data-rename-id="item.id"
                         class="inline-rename-input mono"
+                        enterkeyhint="done"
                         :disabled="renamingClipBusy"
-                        @blur="commitInlineRename(item)"
+                        @blur="!isCoarsePointer && commitInlineRename(item)"
                       />
-                      <UiIcon v-if="renamingClipBusy" name="spinner" :size="12.5" class="spin-anim" />
+                      <button
+                        type="submit"
+                        class="inline-rename-ok"
+                        title="保存文件名"
+                        :disabled="renamingClipBusy"
+                        @pointerdown.prevent
+                      >
+                        <UiIcon
+                          :name="renamingClipBusy ? 'spinner' : 'check'"
+                          :size="13"
+                          :class="{ 'spin-anim': renamingClipBusy }"
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        class="inline-rename-cancel"
+                        title="取消"
+                        :disabled="renamingClipBusy"
+                        @pointerdown.prevent
+                        @click="cancelInlineRename"
+                      >
+                        <UiIcon name="close" :size="12.5" />
+                      </button>
                     </form>
                     <template v-else>
                       <span
@@ -701,7 +762,7 @@ onBeforeUnmount(() => {
                   @click="copyImagePixels(`/api/clips/${item.id}/raw`)"
                 >
                   <UiIcon name="copy" :size="13.5" />
-                  <span class="hide-xs">复制原图</span>
+                  <span>复制原图</span>
                 </button>
 
                 <button
@@ -760,6 +821,8 @@ onBeforeUnmount(() => {
               <video
                 v-if="(item.mimeType || '').startsWith('video/') || (item.fileName || '').endsWith('.mp4')"
                 controls
+                playsinline
+                webkit-playsinline
                 preload="metadata"
                 :src="`/api/clips/${item.id}/raw`"
                 class="inline-video"
@@ -773,12 +836,25 @@ onBeforeUnmount(() => {
                 class="inline-audio"
                 @play="store.pauseAudio()"
               />
-              <iframe
-                v-else
-                :src="`/api/clips/${item.id}/raw`"
-                class="inline-pdf"
-                title="PDF Preview"
-              />
+              <div v-else class="inline-pdf-wrap">
+                <div class="inline-pdf-head">
+                  <span class="mono">PDF PREVIEW</span>
+                  <a
+                    :href="`/api/clips/${item.id}/raw`"
+                    target="_blank"
+                    rel="noopener"
+                    class="pill-btn pdf-open-btn"
+                  >
+                    <UiIcon name="external" :size="12.5" />
+                    <span>新窗口查看全文</span>
+                  </a>
+                </div>
+                <iframe
+                  :src="`/api/clips/${item.id}/raw`"
+                  class="inline-pdf"
+                  title="PDF Preview"
+                />
+              </div>
             </div>
 
             <!-- PER-FILE DESTINATION ROUTING BAR: Silo Image-Host Link & Google Drive Folder Select -->
@@ -832,27 +908,36 @@ onBeforeUnmount(() => {
       <Transition name="lens-modal">
         <div v-if="lightboxClip" class="lb-backdrop" @click.self="lightboxClip = null">
           <div class="liquid-chrome lb-panel">
-            <img :src="`/api/clips/${lightboxClip.id}/raw`" :alt="lightboxClip.fileName" />
-            <div class="lb-bar">
+            <div class="lb-head">
               <span class="lb-name">{{ lightboxClip.fileName }}</span>
-              <div class="lb-acts">
-                <button
-                  type="button"
-                  class="pill-btn"
-                  @click="copyImagePixels(`/api/clips/${lightboxClip.id}/raw`)"
-                >
-                  复制原图
-                </button>
-                <a
-                  class="pill-btn pill-btn--solid"
-                  :href="`/api/clips/${lightboxClip.id}/raw?download=1`"
-                >
-                  下载原图
-                </a>
-                <button type="button" class="icon-circle-btn" @click="lightboxClip = null">
-                  <UiIcon name="close" :size="14" />
-                </button>
-              </div>
+              <button
+                type="button"
+                class="icon-circle-btn"
+                aria-label="关闭预览"
+                @click="lightboxClip = null"
+              >
+                <UiIcon name="close" :size="15" />
+              </button>
+            </div>
+            <div class="lb-stage">
+              <img :src="`/api/clips/${lightboxClip.id}/raw`" :alt="lightboxClip.fileName" />
+            </div>
+            <div class="lb-bar">
+              <button
+                type="button"
+                class="pill-btn"
+                @click="copyImagePixels(`/api/clips/${lightboxClip.id}/raw`)"
+              >
+                <UiIcon name="copy" :size="13.5" />
+                <span>复制原图</span>
+              </button>
+              <a
+                class="pill-btn pill-btn--solid"
+                :href="`/api/clips/${lightboxClip.id}/raw?download=1`"
+              >
+                <UiIcon name="download" :size="13.5" />
+                <span>下载原图</span>
+              </a>
             </div>
           </div>
         </div>
@@ -1047,6 +1132,18 @@ onBeforeUnmount(() => {
   margin-bottom: 7px;
 }
 
+.up-head-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.up-cancel--mobile {
+  display: none;
+}
+
 .up-spin {
   color: var(--ink-2);
 }
@@ -1064,6 +1161,7 @@ onBeforeUnmount(() => {
 .up-stat {
   font-size: 0.72rem;
   color: var(--ink-3);
+  white-space: nowrap;
 }
 
 .up-stat.is-err-txt {
@@ -1071,8 +1169,8 @@ onBeforeUnmount(() => {
 }
 
 .up-cancel {
-  width: 25px;
-  height: 25px;
+  width: 26px;
+  height: 26px;
 }
 
 .up-bar {
@@ -1282,22 +1380,28 @@ onBeforeUnmount(() => {
   border: 0;
   background: transparent;
   color: var(--ink-3);
-  padding: 2px;
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
   display: inline-grid;
   place-items: center;
   cursor: pointer;
-  opacity: 0.55;
+  opacity: 0.65;
   flex-shrink: 0;
 }
-.inline-edit-trigger:hover {
-  opacity: 1;
-  color: var(--ink-1);
+
+@media (hover: hover) and (pointer: fine) {
+  .inline-edit-trigger:hover {
+    opacity: 1;
+    color: var(--ink-1);
+    background: var(--surface-recessed);
+  }
 }
 
 .inline-rename-form {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   flex: 1;
   min-width: 0;
 }
@@ -1305,7 +1409,7 @@ onBeforeUnmount(() => {
 .inline-rename-input {
   width: 100%;
   max-width: 260px;
-  height: 28px;
+  height: 30px;
   padding: 0 8px;
   border-radius: 7px;
   border: 1px solid var(--border-strong);
@@ -1313,6 +1417,28 @@ onBeforeUnmount(() => {
   color: var(--ink-1);
   font-size: 0.82rem;
   outline: none;
+}
+
+.inline-rename-ok,
+.inline-rename-cancel {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 0;
+  display: inline-grid;
+  place-items: center;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.inline-rename-ok {
+  background: var(--cta-bg);
+  color: var(--cta-fg);
+}
+
+.inline-rename-cancel {
+  background: var(--surface-recessed);
+  color: var(--ink-2);
 }
 
 .file-meta {
@@ -1387,6 +1513,27 @@ onBeforeUnmount(() => {
   width: 100%;
 }
 
+.inline-pdf-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inline-pdf-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 4px;
+  font-size: 0.67rem;
+  color: var(--ink-3);
+}
+
+.pdf-open-btn {
+  height: 28px;
+  padding: 0 10px;
+  font-size: 0.74rem;
+}
+
 .inline-pdf {
   width: 100%;
   height: 380px;
@@ -1394,7 +1541,88 @@ onBeforeUnmount(() => {
   border-radius: 7px;
 }
 
-@media (max-width: 720px) {
+@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+  .hub-head-acts {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .filter-strip {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+  .flt-chip {
+    padding: 7px 6px;
+    font-size: 0.79rem;
+    text-align: center;
+  }
+
+  .clr-pill,
+  .clr-armed {
+    height: 36px;
+  }
+
+  .paste-dock {
+    padding: 11px;
+    border-radius: 16px;
+  }
+
+  .paste-input {
+    min-height: 74px;
+    padding: 11px 12px;
+  }
+
+  .paste-bar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .pb-left {
+    width: 100%;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  .pb-left > .pill-btn {
+    flex: 1 1 auto;
+    min-width: 118px;
+  }
+
+  .send-text-btn {
+    width: 100%;
+    height: 40px;
+  }
+
+  .up-top {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+  }
+
+  .up-cancel--desk {
+    display: none;
+  }
+
+  .up-cancel--mobile {
+    display: inline-grid;
+    width: 30px;
+    height: 30px;
+  }
+
+  .up-stat {
+    font-size: 0.71rem;
+    white-space: normal;
+  }
+
+  .clip-card {
+    padding: 12px 13px;
+    border-radius: 16px;
+  }
+
   .file-main-row {
     flex-direction: column;
     align-items: stretch;
@@ -1410,65 +1638,128 @@ onBeforeUnmount(() => {
     -webkit-box-orient: vertical;
     word-break: break-word;
   }
+  .inline-edit-trigger {
+    width: 32px;
+    height: 32px;
+  }
+  .inline-rename-input {
+    max-width: none;
+    height: 36px;
+  }
+  .inline-rename-ok,
+  .inline-rename-cancel {
+    width: 36px;
+    height: 36px;
+  }
   .file-quick-tools {
     width: 100%;
-    justify-content: flex-end;
+    justify-content: flex-start;
+    gap: 7px;
+  }
+  .file-dest-bar {
+    gap: 7px;
+  }
+  .silo-promote-btn {
+    height: 36px;
+    padding: 0 12px;
+    font-size: 0.79rem;
+  }
+  .silo-ready-badge {
+    height: 34px;
+  }
+  .inline-pdf {
+    height: 260px;
   }
   .hide-xs {
     display: none;
   }
 }
 
-/* Lightbox */
+/* Lightbox (4-side safe-area aware) */
 .lb-backdrop {
   position: fixed;
   inset: 0;
   z-index: 9980;
-  background: rgba(8, 9, 12, 0.68);
-  -webkit-backdrop-filter: blur(12px);
-  backdrop-filter: blur(12px);
+  background: rgba(8, 9, 12, 0.72);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
   display: grid;
   place-items: center;
-  padding: 18px;
+  overscroll-behavior: contain;
+  padding:
+    calc(14px + env(safe-area-inset-top, 0px))
+    calc(14px + env(safe-area-inset-right, 0px))
+    calc(14px + env(safe-area-inset-bottom, 0px))
+    calc(14px + env(safe-area-inset-left, 0px));
 }
 
 .lb-panel {
-  max-width: min(92vw, 980px);
-  max-height: 88dvh;
-  border-radius: 16px;
-  padding: 10px;
+  width: min(94vw, 960px);
+  max-height: calc(100dvh - 28px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  border-radius: 18px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow: hidden;
 }
 
-.lb-panel img {
+.lb-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+.lb-stage {
+  flex: 1;
+  min-height: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+
+.lb-stage img {
   max-width: 100%;
-  max-height: calc(88dvh - 70px);
+  max-height: 100%;
   object-fit: contain;
   border-radius: 10px;
+  display: block;
 }
 
 .lb-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 0 4px;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border-hairline);
+  flex-shrink: 0;
 }
 
 .lb-name {
-  font-size: 0.82rem;
-  font-weight: 620;
+  font-size: 0.84rem;
+  font-weight: 630;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
 }
 
-.lb-acts {
-  display: flex;
-  align-items: center;
-  gap: 7px;
+@media (max-width: 680px) {
+  .lb-panel {
+    width: 100%;
+  }
+  .lb-bar {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  .lb-bar > * {
+    width: 100%;
+  }
 }
 
 .pop-btn-enter-active,

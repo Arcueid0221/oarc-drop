@@ -1,14 +1,32 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { shareFullUrl, useDropStore } from '../composables/useDropStore'
+import {
+  canNativeShare,
+  nativeShareLink,
+  shareFullUrl,
+  useDropStore,
+} from '../composables/useDropStore'
+import { useBodyScrollLock } from '../composables/useMobileViewport'
 import CopyPill from './CopyPill.vue'
 import UiIcon from './UiIcon.vue'
 
 const store = useDropStore()
 defineExpose({ shareFullUrl })
+useBodyScrollLock(computed(() => Boolean(store.qrModal.value)))
 
+const supportsNativeShare = canNativeShare()
 const savingOpt = ref(false)
 const passDraft = ref('')
+
+function handleNativeShare() {
+  const modal = store.qrModal.value
+  if (!modal) return
+  void nativeShareLink({
+    title: modal.title,
+    text: modal.subtitle,
+    url: modal.url,
+  })
+}
 
 const linkedShare = computed(() => {
   const code = store.qrModal.value?.shareCode
@@ -83,6 +101,7 @@ async function clearPasscode() {
     <Transition name="lens-modal">
       <div v-if="store.qrModal.value" class="qr-backdrop" @click.self="store.closeQrModal">
         <div class="liquid-chrome qr-sheet">
+          <div class="sheet-grabber" aria-hidden="true" />
           <div class="qr-head">
             <div class="qr-titles">
               <div class="qr-title">{{ store.qrModal.value.title }}</div>
@@ -177,6 +196,9 @@ async function clearPasscode() {
                     placeholder="可选：设提取码…"
                     class="pass-input mono"
                     maxlength="24"
+                    autocapitalize="off"
+                    autocomplete="off"
+                    enterkeyhint="done"
                     :disabled="savingOpt"
                   />
                   <button
@@ -194,6 +216,15 @@ async function clearPasscode() {
 
           <div class="qr-actions">
             <CopyPill :text="store.qrModal.value.url" label="复制链接" copied-label="已复制" />
+            <button
+              v-if="supportsNativeShare"
+              type="button"
+              class="pill-btn pill-btn--solid"
+              @click="handleNativeShare"
+            >
+              <UiIcon name="share-ios" :size="14" />
+              <span>系统分享</span>
+            </button>
             <a
               v-if="store.qrModal.value.url.startsWith('http')"
               :href="store.qrModal.value.url"
@@ -202,7 +233,7 @@ async function clearPasscode() {
               class="pill-btn"
             >
               <UiIcon name="external" :size="14" />
-              <span>新窗口打开</span>
+              <span>打开链接</span>
             </a>
           </div>
         </div>
@@ -221,6 +252,7 @@ async function clearPasscode() {
   backdrop-filter: blur(16px);
   display: grid;
   place-items: center;
+  overscroll-behavior: contain;
   padding:
     calc(18px + env(safe-area-inset-top, 0px))
     calc(18px + env(safe-area-inset-right, 0px))
@@ -230,8 +262,10 @@ async function clearPasscode() {
 
 .qr-sheet {
   width: min(380px, 100%);
-  max-height: 92dvh;
+  max-height: calc(100dvh - 36px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   border-radius: 24px;
   padding: 18px 20px 20px;
   display: flex;
@@ -426,7 +460,89 @@ async function clearPasscode() {
 
 .qr-actions {
   display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
   align-items: center;
   gap: 8px;
+  width: 100%;
+}
+
+@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+  .qr-backdrop {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: calc(16px + env(safe-area-inset-top, 0px)) 0 0 0;
+  }
+
+  .qr-sheet {
+    width: 100%;
+    max-height: calc(var(--vv-height, 100dvh) - 18px - env(safe-area-inset-top, 0px));
+    border-radius: 22px 22px 0 0;
+    border-bottom: 0;
+    padding:
+      12px
+      calc(16px + env(safe-area-inset-right, 0px))
+      calc(18px + env(safe-area-inset-bottom, 0px) + var(--kb-inset, 0px))
+      calc(16px + env(safe-area-inset-left, 0px));
+  }
+
+  .qr-frame {
+    width: 168px;
+    height: 168px;
+  }
+
+  .sec-row {
+    flex-wrap: wrap;
+    gap: 6px 8px;
+  }
+
+  .sec-seg {
+    flex: 1 1 auto;
+    justify-content: space-between;
+  }
+
+  .sec-chip {
+    flex: 1;
+    padding: 7px 6px;
+    font-size: 0.76rem;
+    text-align: center;
+  }
+
+  .sec-pass-wrap {
+    flex: 1 1 200px;
+  }
+
+  .pass-form {
+    max-width: none;
+    gap: 6px;
+  }
+
+  .pass-input {
+    height: 38px;
+    padding: 0 10px;
+    border-radius: 9px;
+  }
+
+  .pass-save-btn {
+    height: 38px;
+    padding: 0 14px;
+    border-radius: 9px;
+    font-size: 0.8rem;
+  }
+
+  .pass-clear-btn {
+    padding: 6px 8px;
+    font-size: 0.78rem;
+  }
+
+  .qr-actions {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  }
+
+  .qr-actions > * {
+    width: 100%;
+  }
 }
 </style>

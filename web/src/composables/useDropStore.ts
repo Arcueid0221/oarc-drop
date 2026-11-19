@@ -141,62 +141,110 @@ export function formatHtmlImage(name: string, url: string): string {
   return `<img src="${url}" alt="${alt}" loading="lazy" />`
 }
 
+export function fallbackCopyText(text: string): boolean {
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.setAttribute('readonly', '')
+  ta.style.cssText =
+    'position:fixed;top:0;left:0;width:1px;height:1px;padding:0;border:0;opacity:0;pointer-events:none;font-size:16px;'
+  document.body.appendChild(ta)
+  ta.focus({ preventScroll: true })
+  ta.select()
+  ta.setSelectionRange(0, text.length)
+  let ok = false
+  try {
+    ok = document.execCommand('copy')
+  } catch {
+    ok = false
+  }
+  document.body.removeChild(ta)
+  return ok
+}
+
 export async function copyText(text: string, label = '已复制到剪贴板') {
   try {
     await navigator.clipboard.writeText(text)
     showToast(label)
   } catch {
-    const ta = document.createElement('textarea')
-    ta.value = text
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
-    showToast(label)
+    if (fallbackCopyText(text)) {
+      showToast(label)
+    } else {
+      showToast('复制受浏览器限制，请长按手动复制')
+    }
   }
 }
 
-// Writes actual image pixels into OS clipboard (converts non-PNG via offscreen canvas so Safari/Chrome/WeChat paste works everywhere!)
-export async function copyImagePixels(srcUrl: string) {
-  if (!navigator.clipboard || typeof ClipboardItem === 'undefined') {
-    showToast('当前浏览器不支持直接写图片到剪贴板，请使用下载')
+export function canNativeShare(): boolean {
+  return typeof navigator !== 'undefined' && typeof navigator.share === 'function'
+}
+
+export async function nativeShareLink(payload: { title?: string; text?: string; url: string }) {
+  if (!canNativeShare()) {
+    await copyText(payload.url, '已复制分享链接')
     return
   }
   try {
-    const res = await fetch(srcUrl)
-    if (!res.ok) throw new Error('拉取原图失败')
-    const blob = await res.blob()
-    if (blob.type === 'image/png') {
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
-      showToast('原图已写入系统剪贴板，可直接 ⌘V 粘贴')
-      return
-    }
-    const bmpUrl = URL.createObjectURL(blob)
-    try {
-      const pngBlob = await new Promise<Blob>((resolve, reject) => {
-        const img = new Image()
-        img.onload = () => {
-          const cv = document.createElement('canvas')
-          cv.width = img.naturalWidth
-          cv.height = img.naturalHeight
-          const ctx = cv.getContext('2d')
-          if (!ctx) {
-            reject(new Error('canvas unavailable'))
-            return
-          }
-          ctx.drawImage(img, 0, 0)
-          cv.toBlob((b) => (b ? resolve(b) : reject(new Error('png encode failed'))), 'image/png')
+    await navigator.share({
+      title: payload.title || 'O.Arc DROP',
+      text: payload.text,
+      url: payload.url,
+    })
+  } catch (e: unknown) {
+    if (e instanceof Error && e.name === 'AbortError') return
+    await copyText(payload.url, '已复制分享链接')
+  }
+}
+
+async function fetchImageAsPngBlob(srcUrl: string): Promise<Blob> {
+  const res = await fetch(srcUrl)
+  if (!res.ok) throw new Error('拉取原图失败')
+  const blob = await res.blob()
+  if (blob.type === 'image/png') return blob
+  const bmpUrl = URL.createObjectURL(blob)
+  try {
+    return await new Promise<Blob>((resolve, reject) => {
+      const img = new Image()
+      img.onload = () => {
+        const cv = document.createElement('canvas')
+        cv.width = img.naturalWidth
+        cv.height = img.naturalHeight
+        const ctx = cv.getContext('2d')
+        if (!ctx) {
+          reject(new Error('canvas unavailable'))
+          return
         }
-        img.onerror = () => reject(new Error('image decode failed'))
-        img.src = bmpUrl
-      })
-      await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })])
-      showToast('图片已写入系统剪贴板，可直接粘贴到微信/文档')
-    } finally {
-      URL.revokeObjectURL(bmpUrl)
-    }
+        ctx.drawImage(img, 0, 0)
+        cv.toBlob((b) => (b ? resolve(b) : reject(new Error('png encode failed'))), 'image/png')
+      }
+      img.onerror = () => reject(new Error('image decode failed'))
+      img.src = bmpUrl
+    })
+  } finally {
+    URL.revokeObjectURL(bmpUrl)
+  }
+}
+
+// Writes actual image pixels into OS clipboard.
+// Uses Promise-backed ClipboardItem synchronously inside the tap gesture so iOS Safari / WebKit permits clipboard write!
+export async function copyImagePixels(srcUrl: string) {
+  if (!navigator.clipboard || typeof ClipboardItem === 'undefined') {
+    showToast('当前浏览器不支持复制图片，请长按图片保存或点下载')
+    return
+  }
+  const pngPromise = fetchImageAsPngBlob(srcUrl)
+  try {
+    await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngPromise })])
+    showToast('原图已写入系统剪贴板，可直接粘贴')
+    return
   } catch {
-    showToast('复制图片受浏览器权限限制，请长按图片或点下载')
+    // Fallback for older Android WebViews that do not accept Promise values in ClipboardItem
+    try {
+      const pngBlob = await pngPromise
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': pngBlob })])
+      showToast('原图已写入系统剪贴板，可直接粘贴')
+    } catch {
+      showToast('复制图片受浏览器权限限制，请长按图片或点下载')
+    }
   }
 }
 

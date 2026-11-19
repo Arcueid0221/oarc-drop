@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import {
+  canNativeShare,
   formatBytes,
   formatTimeShort,
+  nativeShareLink,
   shareFullUrl,
   useDropStore,
 } from '../composables/useDropStore'
@@ -11,6 +13,7 @@ import MorphDeleteBtn from './MorphDeleteBtn.vue'
 import UiIcon from './UiIcon.vue'
 
 const store = useDropStore()
+const supportsNativeShare = canNativeShare()
 const revokingMap = ref<Record<string, boolean>>({})
 
 async function revokeShare(code: string) {
@@ -68,6 +71,15 @@ function storageLabel(st: string): string {
 
           <div class="sh-actions">
             <CopyPill :text="shareFullUrl(sh.code)" label="复制链接" copied-label="已复制" />
+            <button
+              v-if="supportsNativeShare"
+              type="button"
+              class="icon-circle-btn"
+              title="调起系统分享"
+              @click="nativeShareLink({ title: sh.fileName, url: shareFullUrl(sh.code) })"
+            >
+              <UiIcon name="share-ios" :size="14" />
+            </button>
             <button
               type="button"
               class="icon-circle-btn"
@@ -183,17 +195,21 @@ function storageLabel(st: string): string {
   flex-shrink: 0;
 }
 
-@media (max-width: 680px) {
+@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
   .sh-card {
     flex-direction: column;
     align-items: stretch;
     gap: 10px;
+    padding: 12px 13px;
+    border-radius: 16px;
   }
   .sh-actions {
     width: 100%;
     padding-top: 8px;
     border-top: 1px solid var(--border-hairline);
-    justify-content: flex-end;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    gap: 7px;
   }
 }
 

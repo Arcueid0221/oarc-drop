@@ -6,6 +6,7 @@ import {
   showToast,
   useDropStore,
 } from '../composables/useDropStore'
+import { useBodyScrollLock } from '../composables/useMobileViewport'
 import UiIcon from './UiIcon.vue'
 
 export interface VaultTransferSource {
@@ -41,6 +42,7 @@ const emit = defineEmits<{
 }>()
 
 const store = useDropStore()
+useBodyScrollLock(ref(true))
 
 const mode = ref<'copy' | 'move'>(props.initialMode)
 const dstStorage = ref<'silo' | 'gdrive' | 'local'>('silo')
@@ -255,6 +257,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     <Transition name="vc-fade">
       <div class="vc-backdrop" @click.self="!running && emit('close')">
         <div class="liquid-chrome vc-dialog" @click.stop>
+          <div class="sheet-grabber" aria-hidden="true" />
           <header class="vc-head">
             <div class="vc-head-left">
               <div class="vc-title">
@@ -289,7 +292,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               @click="mode = 'copy'"
             >
               <UiIcon name="copy" :size="13.5" />
-              <span>复制（保留原件）</span>
+              <span>复制<span class="vc-mode-note">（保留原件）</span></span>
             </button>
             <button
               type="button"
@@ -299,7 +302,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
               @click="mode = 'move'"
             >
               <UiIcon name="move" :size="14" />
-              <span>移动（自动清理原件）</span>
+              <span>移动<span class="vc-mode-note">（清理原件）</span></span>
             </button>
           </div>
 
@@ -479,6 +482,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   backdrop-filter: blur(16px);
   display: grid;
   place-items: center;
+  overscroll-behavior: contain;
   padding:
     calc(16px + env(safe-area-inset-top, 0px))
     calc(16px + env(safe-area-inset-right, 0px))
@@ -488,8 +492,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 .vc-dialog {
   width: min(468px, 100%);
-  max-height: 90dvh;
+  max-height: calc(100dvh - 32px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
   overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
   border-radius: 22px;
   padding: 18px 20px;
   display: flex;
@@ -741,10 +747,72 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   padding-top: 2px;
 }
 
-@media (max-width: 680px) {
+@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+  .vc-backdrop {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding: calc(16px + env(safe-area-inset-top, 0px)) 0 0 0;
+  }
+
+  .vc-dialog {
+    width: 100%;
+    max-height: calc(var(--vv-height, 100dvh) - 18px - env(safe-area-inset-top, 0px));
+    border-radius: 22px 22px 0 0;
+    border-bottom: 0;
+    padding:
+      12px
+      calc(16px + env(safe-area-inset-right, 0px))
+      calc(18px + env(safe-area-inset-bottom, 0px) + var(--kb-inset, 0px))
+      calc(16px + env(safe-area-inset-left, 0px));
+  }
+
+  .vc-mode-btn {
+    height: 38px;
+    font-size: 0.8rem;
+  }
+
+  .vc-pools {
+    grid-template-columns: repeat(3, 1fr);
+    gap: 6px;
+  }
+
+  .vc-pool-btn {
+    height: 40px;
+    padding: 0 6px;
+    font-size: 0.74rem;
+  }
+
+  .vc-folder-row {
+    min-height: 42px;
+    padding: 9px 11px;
+  }
+
   .vc-dir-input {
     font-size: 16px;
-    height: 36px;
+    height: 40px;
+  }
+
+  .vc-mk-btn {
+    height: 40px;
+    padding: 0 12px;
+  }
+
+  .vc-foot {
+    display: grid;
+    grid-template-columns: 0.9fr 1.6fr;
+    gap: 8px;
+  }
+
+  .vc-foot > .pill-btn {
+    width: 100%;
+    height: 42px;
+  }
+}
+
+@media (max-width: 400px) {
+  .vc-mode-note {
+    display: none;
   }
   .vc-pools {
     grid-template-columns: 1fr;
@@ -752,6 +820,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   .vc-pool-btn {
     justify-content: flex-start;
     padding: 0 12px;
+    font-size: 0.8rem;
   }
 }
 

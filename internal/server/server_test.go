@@ -621,15 +621,22 @@ fi
 		t.Fatalf("expected only 1 pinned clip remaining, got %d", len(remaining))
 	}
 
-	// 15. Unauthenticated PWA full-screen manifest & 512px PNG touch icon under /assets/*
+	// 15. Unauthenticated PWA full-screen manifest & iOS/Android PNG icons under /assets/*
 	mfResp := doReq(http.MethodGet, "/assets/manifest.webmanifest", nil, "", false, nil)
 	if mfResp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 for manifest without auth, got %d", mfResp.StatusCode)
 	}
-	icResp := doReq(http.MethodGet, "/assets/apple-touch-icon.png", nil, "", false, nil)
-	icBytes, _ := io.ReadAll(icResp.Body)
-	if icResp.StatusCode != http.StatusOK || len(icBytes) < 1024 || !bytes.HasPrefix(icBytes, []byte{0x89, 'P', 'N', 'G'}) {
-		t.Fatalf("expected valid PNG touch icon without auth, status=%d len=%d", icResp.StatusCode, len(icBytes))
+	for _, iconPath := range []string{
+		"/assets/apple-touch-icon.png",
+		"/assets/icon-192.png",
+		"/assets/icon-512.png",
+		"/assets/icon-512-maskable.png",
+	} {
+		icResp := doReq(http.MethodGet, iconPath, nil, "", false, nil)
+		icBytes, _ := io.ReadAll(icResp.Body)
+		if icResp.StatusCode != http.StatusOK || len(icBytes) < 1024 || !bytes.HasPrefix(icBytes, []byte{0x89, 'P', 'N', 'G'}) {
+			t.Fatalf("expected valid PNG icon %s without auth, status=%d len=%d", iconPath, icResp.StatusCode, len(icBytes))
+		}
 	}
 
 	// 16. Silo & Drive folder creation + cross-pool specific folder copy + protected/non-empty folder deletion guards

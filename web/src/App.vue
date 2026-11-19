@@ -9,8 +9,10 @@ import SharesView from './components/SharesView.vue'
 import UiIcon from './components/UiIcon.vue'
 import VaultView from './components/VaultView.vue'
 import { formatBytes, useDropStore } from './composables/useDropStore'
+import { useMobileViewport } from './composables/useMobileViewport'
 
 const store = useDropStore()
+useMobileViewport()
 
 type NavTab = 'hub' | 'vault' | 'music' | 'shares'
 
@@ -63,11 +65,25 @@ const theme = ref<'light' | 'dark'>(
 function applyTheme(val: 'light' | 'dark') {
   theme.value = val
   document.documentElement.setAttribute('data-theme', val)
+  document.documentElement.style.colorScheme = val
   localStorage.setItem('oarc_drop_theme', val)
   const metaTheme = document.getElementById('oarc-theme-color')
   if (metaTheme) {
     metaTheme.setAttribute('content', val === 'dark' ? '#08090b' : '#e8eaef')
   }
+  const metaStatusBar = document.getElementById('oarc-ios-status-bar')
+  if (metaStatusBar) {
+    metaStatusBar.setAttribute('content', val === 'dark' ? 'black-translucent' : 'default')
+  }
+}
+
+function selectTab(tab: NavTab) {
+  if (activeTab.value === tab) {
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+    return
+  }
+  activeTab.value = tab
+  window.scrollTo({ top: 0, behavior: 'auto' })
 }
 
 function toggleTheme() {
@@ -326,7 +342,7 @@ onBeforeUnmount(() => {
 
       <!-- Mobile Top Safe-Area Bar -->
       <header class="mobile-topbar">
-        <div class="brand-lockup" @click="activeTab = 'hub'">
+        <div class="brand-lockup" @click="selectTab('hub')">
           <svg class="brand-emblem brand-emblem--sm" viewBox="0 0 30 30" fill="none" aria-hidden="true">
             <rect width="30" height="30" rx="7.5" class="emblem-plate" />
             <rect x="1" y="1" width="28" height="28" rx="6.5" class="emblem-bevel" />
@@ -346,6 +362,14 @@ onBeforeUnmount(() => {
             <span class="brand-code mono">DROP</span>
           </div>
           <span v-if="activeUpload" class="m-up-pill mono">{{ uploadPct }}%</span>
+          <span
+            v-else-if="store.onlineClients.value > 0"
+            class="m-online-chip mono"
+            :title="`${store.onlineClients.value} 台设备在线`"
+          >
+            <i class="presence-dot" :class="{ 'is-multi': store.onlineClients.value > 1 }" />
+            <span>{{ store.onlineClients.value }}</span>
+          </span>
         </div>
 
         <div class="m-right">
@@ -359,8 +383,13 @@ onBeforeUnmount(() => {
           >
             {{ lk.label }}
           </a>
-          <button type="button" class="icon-circle-btn" @click="toggleTheme">
-            <UiIcon :name="theme === 'light' ? 'sun' : 'moon'" :size="14.5" />
+          <button
+            type="button"
+            class="icon-circle-btn m-theme-btn"
+            :aria-label="theme === 'light' ? '切换深色主题' : '切换浅色主题'"
+            @click="toggleTheme"
+          >
+            <UiIcon :name="theme === 'light' ? 'sun' : 'moon'" :size="15" />
           </button>
         </div>
       </header>
@@ -377,36 +406,54 @@ onBeforeUnmount(() => {
     </div>
 
     <!-- Mobile Mini Player + Bottom Tab Bar -->
-    <div class="mobile-bottom-stack">
+    <div
+      class="mobile-bottom-stack"
+      :class="{ 'has-player': Boolean(store.currentTrack.value && activeTab !== 'music') }"
+    >
       <Transition name="fade-up">
         <div
           v-if="store.currentTrack.value && activeTab !== 'music'"
           class="liquid-chrome mobile-mini-player"
-          @click="activeTab = 'music'"
+          @click="selectTab('music')"
         >
           <div class="sbp-disc" :class="{ 'is-spinning': store.isPlaying.value }">
             <img v-if="store.currentCoverUrl.value" :src="store.currentCoverUrl.value" alt="" />
             <span v-else class="sbp-core" />
           </div>
-          <div class="mmp-title">
-            {{ store.currentMeta.value?.title || store.currentTrack.value.name }}
+          <div class="mmp-meta">
+            <div class="mmp-title">
+              {{ store.currentMeta.value?.title || store.currentTrack.value.name }}
+            </div>
+            <div v-if="store.currentMeta.value?.artist" class="mmp-sub">
+              {{ store.currentMeta.value.artist }}
+            </div>
           </div>
-          <div class="sbp-btns" @click.stop>
-            <button type="button" class="sbp-btn" @click="toggleAudioPlay">
-              <UiIcon :name="store.isPlaying.value ? 'pause' : 'play'" :size="13.5" />
+          <div class="sbp-btns mmp-btns" @click.stop>
+            <button
+              type="button"
+              class="sbp-btn mmp-btn"
+              :aria-label="store.isPlaying.value ? '暂停' : '播放'"
+              @click="toggleAudioPlay"
+            >
+              <UiIcon :name="store.isPlaying.value ? 'pause' : 'play'" :size="14" />
             </button>
-            <button type="button" class="sbp-btn" @click="nextAudioTrack">
-              <UiIcon name="next" :size="13.5" />
+            <button
+              type="button"
+              class="sbp-btn mmp-btn"
+              aria-label="下一首"
+              @click="nextAudioTrack"
+            >
+              <UiIcon name="next" :size="14" />
             </button>
           </div>
         </div>
       </Transition>
 
-      <nav class="liquid-chrome mobile-tabbar">
+      <nav class="liquid-chrome mobile-tabbar" aria-label="主导航">
         <div
           class="m-tab-indicator"
           :style="{
-            width: 'calc((100% - 10px) / 4)',
+            width: 'calc((100% - 8px) / 4)',
             transform: `translateX(${activeIdx * 100}%)`,
           }"
         />
@@ -416,9 +463,27 @@ onBeforeUnmount(() => {
           type="button"
           class="m-tab-btn"
           :class="{ 'is-active': activeTab === item.key }"
-          @click="activeTab = item.key"
+          @click="selectTab(item.key)"
         >
-          <UiIcon :name="item.icon" :size="16.5" />
+          <span class="m-tab-icon-wrap">
+            <UiIcon :name="item.icon" :size="17" />
+            <i
+              v-if="item.key === 'music' && store.currentTrack.value && store.isPlaying.value"
+              class="m-tab-live-dot"
+            />
+            <span
+              v-else-if="item.key === 'hub' && activeUpload"
+              class="m-tab-badge is-live mono"
+            >
+              {{ uploadPct }}%
+            </span>
+            <span
+              v-else-if="(item.key === 'hub' || item.key === 'shares') && item.badge"
+              class="m-tab-badge mono"
+            >
+              {{ Number(item.badge) > 99 ? '99+' : item.badge }}
+            </span>
+          </span>
           <span>{{ item.shortLabel }}</span>
         </button>
       </nav>
@@ -847,7 +912,7 @@ onBeforeUnmount(() => {
   display: none;
 }
 
-@media (max-width: 860px) {
+@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
   .desktop-frame {
     height: auto;
     min-height: 100dvh;
@@ -856,7 +921,7 @@ onBeforeUnmount(() => {
   }
 
   .desktop-frame.is-music-locked {
-    height: 100dvh;
+    height: var(--vv-height, 100dvh);
     overflow: hidden;
   }
 
@@ -868,18 +933,25 @@ onBeforeUnmount(() => {
     border: 0;
     box-shadow: none;
     display: block;
-    padding-bottom: calc(98px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));
   }
 
   .desktop-frame.has-mini-player .macos-window {
-    padding-bottom: calc(152px + env(safe-area-inset-bottom, 0px));
+    padding-bottom: calc(156px + env(safe-area-inset-bottom, 0px));
   }
 
   .desktop-frame.is-music-locked .macos-window {
-    height: 100dvh;
+    height: var(--vv-height, 100dvh);
+    min-height: 0;
     display: flex;
     flex-direction: column;
     padding-bottom: calc(74px + env(safe-area-inset-bottom, 0px));
+  }
+
+  :global(html[data-keyboard-open="1"]) .macos-window,
+  :global(html[data-keyboard-open="1"]) .desktop-frame.has-mini-player .macos-window,
+  :global(html[data-keyboard-open="1"]) .desktop-frame.is-music-locked .macos-window {
+    padding-bottom: 8px;
   }
 
   .macos-sidebar {
@@ -893,16 +965,19 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 8px;
     padding:
       max(10px, calc(env(safe-area-inset-top, 0px) + 6px))
-      calc(16px + env(safe-area-inset-right, 0px))
+      calc(14px + env(safe-area-inset-right, 0px))
       10px
-      calc(16px + env(safe-area-inset-left, 0px));
+      calc(14px + env(safe-area-inset-left, 0px));
     background: var(--bg-window);
     -webkit-backdrop-filter: blur(24px) saturate(185%);
     backdrop-filter: blur(24px) saturate(185%);
     border-bottom: 1px solid var(--border-hairline);
     flex-shrink: 0;
+    user-select: none;
+    -webkit-user-select: none;
   }
 
   .m-up-pill {
@@ -913,17 +988,37 @@ onBeforeUnmount(() => {
     color: var(--emerald-fg);
   }
 
+  .m-online-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--surface-recessed);
+    border: 1px solid var(--border-hairline);
+    font-size: 0.64rem;
+    font-weight: 600;
+    color: var(--ink-3);
+  }
+
   .m-right {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
   .m-ext {
-    font-size: 0.75rem;
-    font-weight: 560;
+    font-size: 0.76rem;
+    font-weight: 570;
     color: var(--ink-2);
     text-decoration: none;
+    padding: 6px 4px;
+  }
+
+  .m-theme-btn {
+    width: 36px;
+    height: 36px;
   }
 
   .macos-canvas {
@@ -952,6 +1047,15 @@ onBeforeUnmount(() => {
     flex-direction: column;
     gap: 8px;
     pointer-events: none;
+    transition: transform 0.24s var(--ease-out-quart), opacity 0.18s ease;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  :global(html[data-keyboard-open="1"]) .mobile-bottom-stack {
+    transform: translateY(145%);
+    opacity: 0;
+    pointer-events: none;
   }
 
   .mobile-bottom-stack::before {
@@ -960,42 +1064,69 @@ onBeforeUnmount(() => {
     left: 0;
     right: 0;
     bottom: 0;
-    height: calc(88px + env(safe-area-inset-bottom, 0px));
+    height: calc(92px + env(safe-area-inset-bottom, 0px));
     background: linear-gradient(
       to top,
-      var(--bg-outer) 46%,
+      var(--bg-outer) 50%,
       rgba(232, 234, 239, 0) 100%
     );
     pointer-events: none;
     z-index: -1;
+    transition: height 0.22s ease;
+  }
+
+  .mobile-bottom-stack.has-player::before {
+    height: calc(150px + env(safe-area-inset-bottom, 0px));
   }
 
   [data-theme="dark"] .mobile-bottom-stack::before {
     background: linear-gradient(
       to top,
-      var(--bg-outer) 46%,
+      var(--bg-outer) 50%,
       rgba(8, 9, 11, 0) 100%
     );
   }
 
   .mobile-mini-player {
     pointer-events: auto;
-    height: 46px;
-    padding: 0 10px;
-    border-radius: 14px;
+    min-height: 50px;
+    padding: 6px 10px;
+    border-radius: 15px;
     display: flex;
     align-items: center;
     gap: 10px;
   }
 
-  .mmp-title {
+  .mmp-meta {
     flex: 1;
     min-width: 0;
-    font-size: 0.81rem;
-    font-weight: 620;
+  }
+
+  .mmp-title {
+    font-size: 0.82rem;
+    font-weight: 630;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .mmp-sub {
+    font-size: 0.69rem;
+    color: var(--ink-3);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-top: 1px;
+  }
+
+  .mmp-btns {
+    gap: 6px;
+  }
+
+  .mmp-btn {
+    width: 34px;
+    height: 34px;
+    border-radius: 9px;
   }
 
   .mobile-tabbar {
@@ -1004,7 +1135,7 @@ onBeforeUnmount(() => {
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     padding: 4px;
-    border-radius: 16px;
+    border-radius: 17px;
   }
 
   .m-tab-indicator {
@@ -1012,10 +1143,10 @@ onBeforeUnmount(() => {
     top: 4px;
     bottom: 4px;
     left: 4px;
-    border-radius: 12px;
+    border-radius: 13px;
     background: var(--surface-pill);
     box-shadow: var(--shadow-pill);
-    transition: transform 0.36s var(--ease-spring);
+    transition: transform 0.34s var(--ease-spring);
     pointer-events: none;
   }
 
@@ -1025,20 +1156,94 @@ onBeforeUnmount(() => {
     border: 0;
     background: transparent;
     color: var(--ink-2);
-    padding: 6px 2px;
-    border-radius: 12px;
+    min-height: 46px;
+    padding: 6px 2px 5px;
+    border-radius: 13px;
     display: flex;
     flex-direction: column;
     align-items: center;
-    gap: 2px;
-    font-size: 0.66rem;
+    justify-content: center;
+    gap: 2.5px;
+    font-size: 0.68rem;
     font-weight: 560;
     cursor: pointer;
+    -webkit-touch-callout: none;
   }
 
   .m-tab-btn.is-active {
     color: var(--ink-1);
     font-weight: 660;
+  }
+
+  .m-tab-icon-wrap {
+    position: relative;
+    display: inline-grid;
+    place-items: center;
+  }
+
+  .m-tab-live-dot {
+    position: absolute;
+    top: -2px;
+    right: -5px;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--led-orange);
+    box-shadow: 0 0 6px var(--led-orange);
+  }
+
+  .m-tab-badge {
+    position: absolute;
+    top: -6px;
+    left: 11px;
+    min-width: 15px;
+    height: 15px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--surface-recessed-hover);
+    border: 1px solid var(--border-hairline);
+    color: var(--ink-2);
+    font-size: 0.56rem;
+    font-weight: 660;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+  }
+
+  .m-tab-badge.is-live {
+    background: var(--emerald-bg);
+    border-color: var(--emerald-border);
+    color: var(--emerald-fg);
+  }
+}
+
+@media (max-width: 390px) {
+  .m-ext {
+    display: none;
+  }
+}
+
+@media (max-height: 520px) and (pointer: coarse) {
+  .mobile-topbar {
+    padding-top: max(6px, env(safe-area-inset-top, 0px));
+    padding-bottom: 6px;
+  }
+  .m-tab-btn {
+    min-height: 38px;
+    flex-direction: row;
+    gap: 5px;
+    font-size: 0.72rem;
+  }
+  .m-tab-badge {
+    position: static;
+    margin-left: 1px;
+  }
+  .mobile-bottom-stack {
+    bottom: max(6px, env(safe-area-inset-bottom, 0px));
+  }
+  .desktop-frame.is-music-locked .macos-window {
+    padding-bottom: calc(58px + env(safe-area-inset-bottom, 0px));
   }
 }
 
@@ -1046,11 +1251,11 @@ onBeforeUnmount(() => {
   position: fixed;
   top: 22px;
   right: 26px;
-  z-index: 110;
+  z-index: 10020;
   pointer-events: none;
 }
 
-@media (max-width: 860px) {
+@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
   .toast-anchor {
     top: calc(58px + env(safe-area-inset-top, 0px));
     left: calc(16px + env(safe-area-inset-left, 0px));

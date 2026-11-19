@@ -11,15 +11,19 @@ import (
 )
 
 var (
-	touchIconOnce sync.Once
-	icon180PNG    []byte
-	icon512PNG    []byte
+	touchIconOnce     sync.Once
+	icon180PNG        []byte
+	icon192PNG        []byte
+	icon512PNG        []byte
+	icon512MaskablePNG []byte
 )
 
 func ensureTouchIcons() {
 	touchIconOnce.Do(func() {
-		icon180PNG = renderStudioTouchIcon(180)
-		icon512PNG = renderStudioTouchIcon(512)
+		icon180PNG = renderStudioTouchIcon(180, false)
+		icon192PNG = renderStudioTouchIcon(192, false)
+		icon512PNG = renderStudioTouchIcon(512, false)
+		icon512MaskablePNG = renderStudioTouchIcon(512, true)
 	})
 }
 
@@ -29,27 +33,41 @@ func (s *Server) handleWebManifest(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/manifest+json; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	_, _ = w.Write([]byte(`{
+  "id": "/",
   "name": "O.Arc DROP",
   "short_name": "O.Arc Drop",
   "description": "跨端私密互传 · 三合一文件柜 · 黑胶歌词唱机",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
+  "display_override": ["standalone", "minimal-ui"],
   "orientation": "any",
   "background_color": "#e8eaef",
   "theme_color": "#e8eaef",
   "icons": [
     {
-      "src": "/assets/apple-touch-icon.png?v=140",
+      "src": "/assets/apple-touch-icon.png?v=150",
       "sizes": "180x180",
       "type": "image/png",
       "purpose": "any"
     },
     {
-      "src": "/assets/icon-512.png?v=140",
+      "src": "/assets/icon-192.png?v=150",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/icon-512.png?v=150",
       "sizes": "512x512",
       "type": "image/png",
-      "purpose": "any maskable"
+      "purpose": "any"
+    },
+    {
+      "src": "/assets/icon-512-maskable.png?v=150",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }`))
@@ -64,6 +82,14 @@ func (s *Server) handleAppleTouchIcon(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(icon180PNG)
 }
 
+// handleIcon192 serves the standard 192x192 Android launcher & PWA install icon.
+func (s *Server) handleIcon192(w http.ResponseWriter, r *http.Request) {
+	ensureTouchIcons()
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
+	_, _ = w.Write(icon192PNG)
+}
+
 // handleIcon512 serves the 512x512 high-resolution studio icon for PWA splash & desktop installs.
 func (s *Server) handleIcon512(w http.ResponseWriter, r *http.Request) {
 	ensureTouchIcons()
@@ -72,16 +98,29 @@ func (s *Server) handleIcon512(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(icon512PNG)
 }
 
+// handleIcon512Maskable serves a 512x512 Android adaptive maskable icon with W3C 80% safe-zone inset
+// so circular / squircle / teardrop Android launcher masks never clip the studio dial or LED.
+func (s *Server) handleIcon512Maskable(w http.ResponseWriter, r *http.Request) {
+	ensureTouchIcons()
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Cache-Control", "public, max-age=604800, immutable")
+	_, _ = w.Write(icon512MaskablePNG)
+}
+
 // renderStudioTouchIcon synthesizes an anti-aliased Precision Studio Hardware icon in pure Go:
-// - Full-bleed top-lit anodized obsidian titanium surface (100% opaque for iOS squircle mask)
+// - Full-bleed top-lit anodized obsidian titanium surface (100% opaque for iOS/Android masks)
 // - Machined recessed studio dial with top specular catch-light & micro-vinyl grooves
 // - Signature O.Arc segmented transfer ring + optically balanced rounded-cap Drop arrow
 // - Teenage-Engineering #EA580C status LED with warm glow & crisp core highlight
-func renderStudioTouchIcon(size int) []byte {
+func renderStudioTouchIcon(size int, maskable bool) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, size, size))
 	fSize := float64(size)
 	center := fSize / 2.0
-	scale := fSize / 32.0
+	inset := 1.0
+	if maskable {
+		inset = 0.78
+	}
+	scale := (fSize / 32.0) * inset
 
 	dialR := 11.4 * scale
 	outerRingR := 9.5 * scale

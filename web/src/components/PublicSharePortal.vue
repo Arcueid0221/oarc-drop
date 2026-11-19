@@ -77,7 +77,15 @@ async function verifyCode() {
   }
 }
 
+function isFineHoverDevice(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    window.matchMedia('(hover: hover) and (pointer: fine)').matches
+  )
+}
+
 function onTicketMove(e: MouseEvent) {
+  if (!isFineHoverDevice()) return
   const el = e.currentTarget as HTMLElement
   const r = el.getBoundingClientRect()
   const px = (e.clientX - r.left) / r.width
@@ -90,6 +98,7 @@ function onTicketMove(e: MouseEvent) {
 }
 
 function onTicketLeave(e: MouseEvent) {
+  if (!isFineHoverDevice()) return
   const el = e.currentTarget as HTMLElement
   el.style.setProperty('--tx', '0deg')
   el.style.setProperty('--ty', '0deg')
@@ -99,6 +108,11 @@ function onTicketLeave(e: MouseEvent) {
 const isImage = computed(() => Boolean(meta.value?.mimeType?.startsWith('image/')))
 const isAudio = computed(() => Boolean(meta.value?.mimeType?.startsWith('audio/')))
 const isVideo = computed(() => Boolean(meta.value?.mimeType?.startsWith('video/')))
+const isPdf = computed(
+  () =>
+    meta.value?.mimeType === 'application/pdf' ||
+    Boolean(meta.value?.fileName?.toLowerCase().endsWith('.pdf')),
+)
 
 onMounted(() => {
   void fetchMeta()
@@ -140,6 +154,11 @@ onMounted(() => {
           v-model="passcode"
           class="code-field mono"
           placeholder="输入提取码"
+          autocomplete="one-time-code"
+          autocapitalize="off"
+          autocorrect="off"
+          spellcheck="false"
+          enterkeyhint="go"
           autofocus
         />
         <p v-if="unlockErr" class="lock-err">{{ unlockErr }}</p>
@@ -181,7 +200,19 @@ onMounted(() => {
           </div>
 
           <div v-else-if="isVideo" class="media-window">
-            <video controls preload="metadata" :src="`/s/${code}/raw?preview=1`" />
+            <video controls playsinline webkit-playsinline preload="metadata" :src="`/s/${code}/raw?preview=1`" />
+          </div>
+
+          <div v-else-if="isPdf" class="pdf-preview-bar">
+            <a
+              class="pill-btn full-cta"
+              :href="`/s/${code}/raw?preview=1`"
+              target="_blank"
+              rel="noopener"
+            >
+              <UiIcon name="eye" :size="15" />
+              <span>在线预览 PDF（不扣下载次数）</span>
+            </a>
           </div>
 
           <pre v-else-if="previewText" class="text-window mono">{{ previewText }}</pre>
@@ -235,10 +266,12 @@ onMounted(() => {
 .parallax-ticket {
   --tx: 0deg;
   --ty: 0deg;
+  --ticket-pad: 24px;
   width: min(500px, 100%);
-  padding: 24px;
+  padding: var(--ticket-pad);
   transform: rotateX(var(--tx)) rotateY(var(--ty));
   transition: transform 0.2s ease-out;
+  overflow: hidden;
 }
 
 .parallax-ticket.is-shaking {
@@ -423,7 +456,7 @@ onMounted(() => {
   position: relative;
   display: flex;
   align-items: center;
-  margin: 20px -24px;
+  margin: 20px calc(var(--ticket-pad) * -1);
 }
 
 .notch {
@@ -447,21 +480,76 @@ onMounted(() => {
   border-top: 1.5px dashed var(--border-strong);
 }
 
+.pdf-preview-bar {
+  margin-top: 4px;
+}
+
 .sha-line {
-  font-size: 0.71rem;
+  font-size: 0.69rem;
+  line-height: 1.45;
   color: var(--ink-3);
   text-align: center;
   margin-bottom: 12px;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+  padding: 0 4px;
 }
 
 .stub-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
 .full-cta {
   flex: 1;
-  height: 42px;
-  font-size: 0.87rem;
+  min-width: 0;
+  height: 44px;
+  font-size: 0.88rem;
+}
+
+@media (max-width: 520px) {
+  .ticket-stage {
+    padding:
+      calc(16px + env(safe-area-inset-top, 0px))
+      calc(12px + env(safe-area-inset-right, 0px))
+      calc(20px + env(safe-area-inset-bottom, 0px))
+      calc(12px + env(safe-area-inset-left, 0px));
+  }
+
+  .parallax-ticket {
+    --ticket-pad: 18px;
+    border-radius: 20px;
+  }
+
+  .ticket-title {
+    font-size: 1.08rem;
+    line-height: 1.35;
+  }
+
+  .ticket-grid {
+    gap: 8px;
+    padding: 10px;
+    border-radius: 13px;
+  }
+
+  .kv-v {
+    font-size: 0.74rem;
+    word-break: break-word;
+  }
+
+  .media-window img,
+  .media-window video {
+    max-height: 44dvh;
+  }
+
+  .stub-actions {
+    flex-direction: column;
+  }
+
+  .stub-actions > * {
+    width: 100%;
+    height: 44px;
+  }
 }
 </style>

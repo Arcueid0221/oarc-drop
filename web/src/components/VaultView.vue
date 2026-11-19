@@ -12,6 +12,7 @@ import {
   showToast,
   useDropStore,
 } from '../composables/useDropStore'
+import { useBodyScrollLock } from '../composables/useMobileViewport'
 import type { ClipItem, GDriveFile, MediaItem, VaultObject } from '../types'
 import CopyPill from './CopyPill.vue'
 import DriveFolderSelect from './DriveFolderSelect.vue'
@@ -83,10 +84,24 @@ const previewObj = ref<{
   spec: string
   siloAudioKey?: string
   transferSource?: VaultTransferSource
+  siloObj?: VaultObject
+  driveObj?: GDriveFile
+  localObj?: ClipItem
 } | null>(null)
 
 const renameTarget = ref<VaultObject | null>(null)
 const renameDraft = ref('')
+
+useBodyScrollLock(
+  computed(() =>
+    Boolean(
+      previewObj.value ||
+        renameTarget.value ||
+        folderDeleteConfirm.value ||
+        batchDeleteConfirmOpen.value,
+    ),
+  ),
+)
 
 const pools = computed(() => [
   { key: 'silo' as const, label: 'Silo 存储桶', enabled: Boolean(store.status.value?.siloEnabled) },
@@ -1052,6 +1067,7 @@ function openPreviewSilo(item: VaultObject) {
     kind: item.kind,
     spec: `${describeSiloFolder(item.folder)} · ${formatBytes(item.size)} · ${formatTimeShort(item.lastModified)}`,
     siloAudioKey: item.kind === 'audio' ? item.key : undefined,
+    siloObj: item,
     transferSource: {
       storage: 'silo',
       key: item.key,
@@ -1074,6 +1090,7 @@ function openPreviewDrive(gd: GDriveFile) {
     size: gd.size,
     kind: gd.kind,
     spec: `Drive: ${gd.path} · ${formatBytes(gd.size)} · ${formatTimeShort(gd.lastModified)}`,
+    driveObj: gd,
     transferSource: {
       storage: 'gdrive',
       key: gd.path,
@@ -1105,6 +1122,7 @@ function openPreviewLocal(lc: ClipItem) {
     size: lc.size || 0,
     kind,
     spec: `私密互传 · ${formatBytes(lc.size)} · ${formatTimeShort(lc.createdAt)}`,
+    localObj: lc,
     transferSource: {
       storage: 'local',
       key: lc.id,
@@ -1113,6 +1131,49 @@ function openPreviewLocal(lc: ClipItem) {
     },
   }
 }
+
+async function sharePreviewItem() {
+  const p = previewObj.value
+  if (!p) return
+  if (p.siloObj) {
+    await shareVaultItem(`silo:${p.siloObj.key}`, 'silo', p.siloObj.key, p.siloObj.name, p.siloObj.size)
+  } else if (p.driveObj) {
+    await shareVaultItem(`gd:${p.driveObj.path}`, 'gdrive', p.driveObj.path, p.driveObj.name, p.driveObj.size)
+  } else if (p.localObj) {
+    await shareLocalClip(p.localObj)
+  }
+}
+
+async function deletePreviewItem(force: boolean) {
+  const p = previewObj.value
+  if (!p) return
+  if (p.siloObj) {
+    await deleteSilo(p.siloObj, force)
+  } else if (p.driveObj) {
+    await deleteDrive(p.driveObj)
+  } else if (p.localObj) {
+    await deleteLocalClip(p.localObj.id, p.localObj.fileName)
+  }
+  previewObj.value = null
+}
+
+const previewShareBusy = computed(() => {
+  const p = previewObj.value
+  if (!p) return false
+  if (p.siloObj) return Boolean(sharingBusy.value[`silo:${p.siloObj.key}`])
+  if (p.driveObj) return Boolean(sharingBusy.value[`gd:${p.driveObj.path}`])
+  if (p.localObj) return Boolean(sharingBusy.value[`local:${p.localObj.id}`])
+  return false
+})
+
+const previewDeleteBusy = computed(() => {
+  const p = previewObj.value
+  if (!p) return false
+  if (p.siloObj) return Boolean(deletingMap.value[`silo:${p.siloObj.key}`])
+  if (p.driveObj) return Boolean(deletingMap.value[`gd:${p.driveObj.path}`])
+  if (p.localObj) return Boolean(deletingMap.value[`local:${p.localObj.id}`])
+  return false
+})
 
 function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   if (kind === 'audio') return 'disc'
@@ -2298,31 +2359,56 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
       </Transition>
     </Teleport>
 
-    <!-- Preview Lightbox (Image / Video / Audio / PDF across all 3 pools!) -->
+    <!-- Preview Lightbox / Mobile Bottom Sheet (Image / Video / Audio / PDF across all 3 pools!) -->
     <Teleport to="body">
       <Transition name="lens-modal">
-        <div v-if="previewObj" class="modal-backdrop" @click.self="previewObj = null">
+        <div v-if="previewObj" class="modal-backdrop pd-backdrop" @click.self="previewObj = null">
           <div class="liquid-chrome preview-dialog">
-            <button type="button" class="icon-circle-btn pd-close" @click="previewObj = null">
-              <UiIcon name="close" :size="16" />
-            </button>
+            <div class="sheet-grabber" aria-hidden="true" />
+            <header class="pd-head">
+              <div class="pd-head-meta">
+                <div class="pd-title">{{ previewObj.name }}</div>
+                <div class="pd-spec">{{ previewObj.spec }}</div>
+              </div>
+              <button
+                type="button"
+                class="icon-circle-btn pd-close"
+                aria-label="关闭预览"
+                @click="previewObj = null"
+              >
+                <UiIcon name="close" :size="16" />
+              </button>
+            </header>
+
             <div class="pd-stage">
               <img v-if="previewObj.kind === 'image'" :src="previewObj.streamUrl" :alt="previewObj.name" />
-              <video v-else-if="previewObj.kind === 'video'" controls :src="previewObj.streamUrl" />
-              <audio v-else-if="previewObj.kind === 'audio'" controls :src="previewObj.streamUrl" />
-              <iframe
-                v-else-if="previewObj.name.toLowerCase().endsWith('.pdf')"
+              <video
+                v-else-if="previewObj.kind === 'video'"
+                controls
+                playsinline
+                webkit-playsinline
                 :src="previewObj.streamUrl"
-                class="pd-pdf"
-                title="Preview"
               />
+              <audio v-else-if="previewObj.kind === 'audio'" controls :src="previewObj.streamUrl" />
+              <div v-else-if="previewObj.name.toLowerCase().endsWith('.pdf')" class="pd-pdf-wrap">
+                <iframe :src="previewObj.streamUrl" class="pd-pdf" title="Preview" />
+                <a
+                  :href="previewObj.streamUrl"
+                  target="_blank"
+                  rel="noopener"
+                  class="pill-btn pd-pdf-ext"
+                >
+                  <UiIcon name="external" :size="13.5" />
+                  <span>在浏览器新标签查看 PDF 全文</span>
+                </a>
+              </div>
               <div v-else class="pd-fallback">
                 <UiIcon name="file" :size="40" />
-                <div>{{ previewObj.name }}</div>
+                <div class="pd-fallback-name">{{ previewObj.name }}</div>
               </div>
             </div>
+
             <footer class="pd-bar">
-              <span class="pd-spec">{{ previewObj.spec }}</span>
               <div class="pd-acts">
                 <button
                   v-if="previewObj.siloAudioKey"
@@ -2336,20 +2422,12 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
                   "
                 >
                   <UiIcon name="disc" :size="14" />
-                  <span>送入音乐厅唱机</span>
+                  <span>送入唱机</span>
                 </button>
-                <button
-                  v-if="previewObj.transferSource"
-                  type="button"
-                  class="pill-btn"
-                  @click="
-                    openSingleTransfer(previewObj.transferSource);
-                    previewObj = null
-                  "
-                >
-                  <UiIcon name="move" :size="14" />
-                  <span>复制 / 移动…</span>
-                </button>
+                <a class="pill-btn pill-btn--solid" :href="previewObj.downloadUrl">
+                  <UiIcon name="download" :size="14" />
+                  <span>下载</span>
+                </a>
                 <button
                   v-if="previewObj.kind === 'image'"
                   type="button"
@@ -2377,10 +2455,50 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
                   label="复制直链"
                   copied-label="已复制"
                 />
-                <a class="pill-btn" :href="previewObj.downloadUrl">
-                  <UiIcon name="download" :size="14" />
-                  <span>下载</span>
-                </a>
+                <button
+                  v-if="previewObj.transferSource"
+                  type="button"
+                  class="pill-btn"
+                  @click="
+                    openSingleTransfer(previewObj.transferSource);
+                    previewObj = null
+                  "
+                >
+                  <UiIcon name="move" :size="14" />
+                  <span>复制 / 移动</span>
+                </button>
+                <button
+                  type="button"
+                  class="pill-btn"
+                  :disabled="previewShareBusy"
+                  @click="sharePreviewItem"
+                >
+                  <UiIcon
+                    :name="previewShareBusy ? 'spinner' : 'qr'"
+                    :size="14"
+                    :class="{ 'spin-anim': previewShareBusy }"
+                  />
+                  <span>分享码</span>
+                </button>
+                <button
+                  v-if="previewObj.siloObj"
+                  type="button"
+                  class="pill-btn"
+                  @click="
+                    startRename(previewObj.siloObj);
+                    previewObj = null
+                  "
+                >
+                  <UiIcon name="edit" :size="14" />
+                  <span>重命名</span>
+                </button>
+                <MorphDeleteBtn
+                  title="删除此文件"
+                  :busy="previewDeleteBusy"
+                  :protected-item="Boolean(previewObj.siloObj?.protected)"
+                  :protected-title="`删除 ${previewObj.name}`"
+                  @confirm="deletePreviewItem($event)"
+                />
               </div>
             </footer>
           </div>
@@ -2504,6 +2622,9 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   overflow-x: auto;
   max-width: 100%;
   scrollbar-width: none;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  scroll-snap-type: x proximity;
 }
 .cat-pills::-webkit-scrollbar {
   display: none;
@@ -2523,6 +2644,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   gap: 6px;
   white-space: nowrap;
   flex-shrink: 0;
+  scroll-snap-align: start;
   cursor: pointer;
   transition:
     background-color 0.18s ease,
@@ -3113,16 +3235,47 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   transform: translate(-50%, 14px) scale(0.96);
 }
 
-@media (max-width: 860px) {
+@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+  .vault-page.has-batch-dock {
+    padding-bottom: 126px;
+  }
+
   .batch-dock {
     left: calc(12px + env(safe-area-inset-left, 0px));
     right: calc(12px + env(safe-area-inset-right, 0px));
     transform: none;
     max-width: none;
-    bottom: calc(78px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(80px + env(safe-area-inset-bottom, 0px));
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 10px 12px;
+    transition: transform 0.24s var(--ease-out-quart), opacity 0.18s ease;
   }
   .batch-dock.is-above-player {
-    bottom: calc(132px + env(safe-area-inset-bottom, 0px));
+    bottom: calc(138px + env(safe-area-inset-bottom, 0px));
+  }
+  :global(html[data-keyboard-open="1"]) .batch-dock {
+    transform: translateY(150%);
+    opacity: 0;
+    pointer-events: none;
+  }
+  .bd-info {
+    justify-content: space-between;
+  }
+  .bd-acts {
+    width: 100%;
+    justify-content: space-between;
+  }
+  .bd-acts > .pill-btn {
+    flex: 1 1 auto;
+    height: 36px;
+    padding: 0 8px;
+    font-size: 0.77rem;
+  }
+  .bd-close {
+    width: 36px;
+    height: 36px;
   }
   .dock-pop-enter-from,
   .dock-pop-leave-to {
@@ -3131,8 +3284,8 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   }
 }
 
-/* Mobile Responsive Fix */
-@media (max-width: 720px) {
+/* Mobile Responsive Polish (iPhone Air 420pt & Android 360–412px) */
+@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
   .vault-top-acts {
     width: 100%;
   }
@@ -3141,30 +3294,123 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
     width: 100%;
   }
 
+  .vault-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+
+  .vault-toolbar > .search-pill {
+    width: 100%;
+    flex: none;
+  }
+
+  .vt-right {
+    width: 100%;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .vt-right > .pill-btn {
+    flex: 1 1 auto;
+    padding: 0 10px;
+    font-size: 0.78rem;
+  }
+
+  .pool-info-panel {
+    padding: 10px 12px;
+    border-radius: 14px;
+  }
+
+  .cat-btn {
+    height: 34px;
+    padding: 0 11px;
+    font-size: 0.79rem;
+  }
+
+  .pool-head-right {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .folder-add-btn,
+  .folder-del-btn {
+    height: 34px;
+    padding: 0 11px;
+    font-size: 0.77rem;
+  }
+
+  .nf-input-row {
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  .nf-prefix-tag {
+    width: 100%;
+    padding-left: 2px;
+    font-size: 0.72rem;
+  }
+
   .nf-input,
   .rn-input {
     font-size: 16px;
-    height: 36px;
+    height: 40px;
+  }
+
+  .nf-input-row .pill-btn--mini {
+    height: 40px;
+    padding: 0 14px;
+    font-size: 0.8rem;
   }
 
   .subtag-strip {
     flex-wrap: nowrap;
     overflow-x: auto;
     scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
     padding-bottom: 2px;
   }
   .subtag-strip::-webkit-scrollbar {
     display: none;
   }
 
+  .subtag-chip {
+    height: 32px;
+    padding: 0 11px;
+    font-size: 0.76rem;
+  }
+
+  /* Clean mobile gallery tiles: tap opens full-featured Preview Sheet instead of cramming 7 tiny buttons! */
   .lens-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 10px;
+    gap: 9px;
   }
 
   .lens-tile {
-    aspect-ratio: 1 / 1.05;
+    aspect-ratio: 1 / 1;
     border-radius: 14px;
+  }
+
+  .lens-tile .tile-btns {
+    display: none;
+  }
+
+  .lens-tile .tile-scrim {
+    padding: 20px 9px 8px;
+    gap: 2px;
+  }
+
+  .sel-badge {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+  }
+
+  .sel-check-inline {
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
   }
 
   .file-row {
@@ -3196,7 +3442,20 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
     width: 100%;
     padding-top: 8px;
     border-top: 1px solid var(--border-hairline);
-    justify-content: flex-end;
+    justify-content: flex-start;
+    gap: 7px;
+  }
+
+  .mini-act {
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
+  }
+
+  .pill-btn--mini {
+    height: 34px;
+    padding: 0 11px;
+    font-size: 0.77rem;
   }
 }
 
@@ -3210,6 +3469,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   backdrop-filter: blur(16px);
   display: grid;
   place-items: center;
+  overscroll-behavior: contain;
   padding:
     calc(18px + env(safe-area-inset-top, 0px))
     calc(18px + env(safe-area-inset-right, 0px))
@@ -3234,6 +3494,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
 .rn-sub {
   font-size: 0.74rem;
   color: var(--ink-2);
+  word-break: break-word;
 }
 
 .rn-warn {
@@ -3265,76 +3526,164 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
 
 .preview-dialog {
   width: min(920px, 100%);
-  max-height: 90dvh;
-  padding: 16px;
+  max-height: calc(100dvh - 36px - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
+  padding: 14px 16px 16px;
   border-radius: 24px;
   display: flex;
   flex-direction: column;
   gap: 12px;
   position: relative;
+  overflow: hidden;
+}
+
+.pd-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.pd-head-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.pd-title {
+  font-size: 0.94rem;
+  font-weight: 660;
+  color: var(--ink-1);
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .pd-close {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  z-index: 2;
+  flex-shrink: 0;
 }
 
 .pd-stage {
   flex: 1;
-  min-height: 0;
+  min-height: 120px;
   display: grid;
   place-items: center;
   overflow: hidden;
+  border-radius: 14px;
+  background: var(--surface-recessed);
+  padding: 6px;
 }
 
 .pd-stage img,
 .pd-stage video {
   max-width: 100%;
-  max-height: 70dvh;
-  border-radius: 14px;
+  max-height: 60dvh;
+  border-radius: 10px;
   object-fit: contain;
+  display: block;
 }
 
 .pd-stage audio {
   width: min(440px, 100%);
 }
 
-.pd-pdf {
+.pd-pdf-wrap {
   width: 100%;
-  height: 70dvh;
-  border: none;
-  border-radius: 12px;
-}
-
-.pd-fallback {
-  padding: 48px;
   display: flex;
   flex-direction: column;
   align-items: center;
+  gap: 8px;
+}
+
+.pd-pdf {
+  width: 100%;
+  height: 54dvh;
+  border: none;
+  border-radius: 10px;
+}
+
+.pd-pdf-ext {
+  width: 100%;
+}
+
+.pd-fallback {
+  padding: 36px 20px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
   gap: 10px;
   color: var(--ink-2);
+}
+
+.pd-fallback-name {
+  word-break: break-word;
+  font-size: 0.86rem;
 }
 
 .pd-bar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  font-size: 0.76rem;
-  color: var(--ink-2);
+  flex-shrink: 0;
+  max-height: 30dvh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-hairline);
 }
 
 .pd-spec {
+  margin-top: 2px;
+  font-size: 0.72rem;
+  color: var(--ink-3);
   word-break: break-word;
 }
 
 .pd-acts {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 7px;
+}
+
+@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+  .pd-backdrop {
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    padding:
+      calc(14px + env(safe-area-inset-top, 0px))
+      0
+      0
+      0;
+  }
+
+  .preview-dialog {
+    width: 100%;
+    max-height: calc(92dvh - env(safe-area-inset-top, 0px));
+    border-radius: 22px 22px 0 0;
+    border-bottom: 0;
+    padding:
+      12px
+      calc(14px + env(safe-area-inset-right, 0px))
+      calc(16px + env(safe-area-inset-bottom, 0px))
+      calc(14px + env(safe-area-inset-left, 0px));
+  }
+
+  .pd-stage img,
+  .pd-stage video {
+    max-height: 44dvh;
+  }
+
+  .pd-pdf {
+    height: 34dvh;
+  }
+
+  .pd-acts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
 }
 
 .up-fold-enter-active,

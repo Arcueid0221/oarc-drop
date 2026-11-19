@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { useBodyScrollLock } from '../composables/useMobileViewport'
 import UiIcon from './UiIcon.vue'
 
 const props = withDefaults(
@@ -32,6 +33,7 @@ const emit = defineEmits<{
 const armed = ref(false)
 const showLockSheet = ref(false)
 let resetTimer: number | undefined
+useBodyScrollLock(showLockSheet)
 
 function disarm() {
   armed.value = false
@@ -170,10 +172,12 @@ onBeforeUnmount(() => {
   border-radius: 7px;
 }
 
-.morph-trigger:hover {
-  color: var(--danger-fg);
-  border-color: rgba(220, 38, 38, 0.32);
-  background: var(--danger-bg);
+@media (hover: hover) and (pointer: fine) {
+  .morph-trigger:hover {
+    color: var(--danger-fg);
+    border-color: rgba(220, 38, 38, 0.32);
+    background: var(--danger-bg);
+  }
 }
 
 .morph-trigger:active {
@@ -268,7 +272,45 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(8px);
   display: grid;
   place-items: center;
-  padding: 18px;
+  overscroll-behavior: contain;
+  padding:
+    calc(18px + env(safe-area-inset-top, 0px))
+    calc(18px + env(safe-area-inset-right, 0px))
+    calc(18px + env(safe-area-inset-bottom, 0px))
+    calc(18px + env(safe-area-inset-left, 0px));
+}
+
+@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+  .morph-trigger {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+  }
+  .morph-trigger.is-compact {
+    width: 36px;
+    height: 36px;
+    border-radius: 9px;
+  }
+  .morph-busy {
+    height: 36px;
+    padding: 0 11px;
+  }
+  .morph-busy.is-compact {
+    width: 36px;
+    height: 36px;
+  }
+  .morph-armed {
+    height: 36px;
+    padding: 3px;
+  }
+  .morph-yes {
+    padding: 0 10px;
+    font-size: 0.78rem;
+  }
+  .morph-no {
+    width: 30px;
+    height: 30px;
+  }
 }
 
 .lock-dialog {

@@ -189,7 +189,9 @@ func (s *Server) registerRoutes() {
 	// Unauthenticated PWA full-screen assets under /assets/* (covered by Cloudflare Access /assets/* bypass!)
 	s.mux.HandleFunc("GET /assets/manifest.webmanifest", s.handleWebManifest)
 	s.mux.HandleFunc("GET /assets/apple-touch-icon.png", s.handleAppleTouchIcon)
+	s.mux.HandleFunc("GET /assets/icon-192.png", s.handleIcon192)
 	s.mux.HandleFunc("GET /assets/icon-512.png", s.handleIcon512)
+	s.mux.HandleFunc("GET /assets/icon-512-maskable.png", s.handleIcon512Maskable)
 	s.mux.HandleFunc("GET /apple-touch-icon.png", s.handleAppleTouchIcon)
 	s.mux.HandleFunc("GET /apple-touch-icon-precomposed.png", s.handleAppleTouchIcon)
 

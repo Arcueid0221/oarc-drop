@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref } from 'vue'
+import { fallbackCopyText } from '../composables/useDropStore'
 import UiIcon from './UiIcon.vue'
 
 const props = withDefaults(
@@ -24,12 +25,7 @@ async function handleCopy() {
   try {
     await navigator.clipboard.writeText(props.text)
   } catch {
-    const ta = document.createElement('textarea')
-    ta.value = props.text
-    document.body.appendChild(ta)
-    ta.select()
-    document.execCommand('copy')
-    document.body.removeChild(ta)
+    fallbackCopyText(props.text)
   }
   copied.value = true
   if (timer) window.clearTimeout(timer)
@@ -88,13 +84,28 @@ async function handleCopy() {
   font-size: 0.75rem;
 }
 
-.copy-pill:hover {
-  border-color: var(--border-strong);
-  background: var(--surface-pill);
+@media (hover: hover) and (pointer: fine) {
+  .copy-pill:hover {
+    border-color: var(--border-strong);
+    background: var(--surface-pill);
+  }
 }
 
 .copy-pill:active {
   transform: scale(0.94);
+}
+
+@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+  .copy-pill {
+    height: 36px;
+    padding: 0 13px;
+    font-size: 0.8rem;
+  }
+  .copy-pill.is-compact {
+    height: 34px;
+    padding: 0 11px;
+    font-size: 0.77rem;
+  }
 }
 
 .copy-pill.is-copied {
