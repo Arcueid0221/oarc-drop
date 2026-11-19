@@ -1222,6 +1222,9 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 132px;
 }
 
 .clip-card.is-pinned {
@@ -1750,6 +1753,10 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 680px) {
+  .lb-backdrop {
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+  }
   .lb-panel {
     width: 100%;
   }

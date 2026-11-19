@@ -2880,7 +2880,10 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   background: var(--surface-recessed);
   border: 1px solid var(--border-hairline);
   cursor: pointer;
-  transition: transform 0.18s var(--ease-spring), box-shadow 0.18s ease, border-color 0.18s ease;
+  contain: layout style paint;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 180px;
+  transition: transform 0.18s var(--ease-spring), border-color 0.18s ease;
 }
 
 .lens-tile.is-selected {
@@ -3063,7 +3066,10 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  transition: border-color 0.16s ease, box-shadow 0.16s ease;
+  contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 74px;
+  transition: border-color 0.16s ease;
 }
 
 .file-row.is-selected {
@@ -3647,6 +3653,11 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
 }
 
 @media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+  .modal-backdrop {
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
+  }
+
   .pd-backdrop {
     display: flex;
     align-items: flex-end;

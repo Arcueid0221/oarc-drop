@@ -753,6 +753,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
     align-items: flex-end;
     justify-content: center;
     padding: calc(16px + env(safe-area-inset-top, 0px)) 0 0 0;
+    -webkit-backdrop-filter: blur(6px);
+    backdrop-filter: blur(6px);
   }
 
   .vc-dialog {

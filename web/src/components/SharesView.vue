@@ -138,6 +138,9 @@ function storageLabel(st: string): string {
   justify-content: space-between;
   align-items: center;
   gap: 12px;
+  contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 84px;
 }
 
 .sh-info {

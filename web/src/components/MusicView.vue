@@ -137,9 +137,9 @@ function centerElementInScrollBox(
 }
 
 watch(
-  [activeLyricIndex, () => store.currentLyrics.value.length],
-  async ([idx]) => {
-    if (idx < 0) return
+  [activeLyricIndex, () => store.currentLyrics.value.length, isScrubbing],
+  async ([idx, , scrubbing]) => {
+    if (idx < 0 || scrubbing) return
     await nextTick()
     const box = lyricsContainer.value
     if (!box) return
@@ -183,11 +183,14 @@ function stepTrack(delta: number) {
   window.dispatchEvent(new CustomEvent('oarc-audio-step', { detail: delta }))
 }
 
-function updateScrubPreviewFromX(clientX: number) {
-  const el = scrubEl.value
+let cachedScrubRect: DOMRect | null = null
+let scrubRafId = 0
+let pendingScrubX = 0
+
+function applyScrubX(clientX: number) {
+  const r = cachedScrubRect || scrubEl.value?.getBoundingClientRect()
   const dur = store.audioDuration.value
-  if (!el || !dur) return
-  const r = el.getBoundingClientRect()
+  if (!r || !dur || r.width <= 0) return
   const raw = (clientX - r.left) / r.width
   if (raw < 0) jellyStretch.value = Math.max(-7, raw * 20)
   else if (raw > 1) jellyStretch.value = Math.min(7, (raw - 1) * 20)
@@ -197,33 +200,56 @@ function updateScrubPreviewFromX(clientX: number) {
   scrubPreviewSec.value = clamped * dur
 }
 
+function flushPendingScrub() {
+  scrubRafId = 0
+  if (!isScrubbing.value) return
+  applyScrubX(pendingScrubX)
+}
+
 function onScrubDown(e: PointerEvent) {
   if (!store.audioDuration.value) return
   isScrubbing.value = true
+  cachedScrubRect = scrubEl.value?.getBoundingClientRect() || null
   ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
-  updateScrubPreviewFromX(e.clientX)
+  applyScrubX(e.clientX)
 }
 
 function onScrubMove(e: PointerEvent) {
   if (!isScrubbing.value) return
-  updateScrubPreviewFromX(e.clientX)
+  pendingScrubX = e.clientX
+  if (!scrubRafId) {
+    scrubRafId = window.requestAnimationFrame(flushPendingScrub)
+  }
 }
 
 function onScrubUp() {
   if (!isScrubbing.value) return
+  if (scrubRafId) {
+    window.cancelAnimationFrame(scrubRafId)
+    scrubRafId = 0
+    applyScrubX(pendingScrubX)
+  }
   const targetSec = scrubPreviewSec.value
   isScrubbing.value = false
+  cachedScrubRect = null
   jellyStretch.value = 0
   seekToTime(targetSec)
 }
 
 function onScrubCancel() {
+  if (scrubRafId) {
+    window.cancelAnimationFrame(scrubRafId)
+    scrubRafId = 0
+  }
   isScrubbing.value = false
+  cachedScrubRect = null
   jellyStretch.value = 0
 }
 
 onBeforeUnmount(() => {
+  if (scrubRafId) window.cancelAnimationFrame(scrubRafId)
   isScrubbing.value = false
+  cachedScrubRect = null
   if (reboundTimer) window.clearTimeout(reboundTimer)
 })
 
@@ -407,8 +433,16 @@ const playModeLabel = computed(() => {
                   @pointercancel="onScrubCancel"
                 >
                   <div class="scrub-track">
-                    <div class="scrub-fill" :style="{ width: `${progressRatio * 100}%` }" />
-                    <span class="scrub-thumb" :style="{ left: `${progressRatio * 100}%` }" />
+                    <div
+                      class="scrub-fill"
+                      :style="{ transform: `scaleX(${progressRatio})` }"
+                    />
+                    <div
+                      class="scrub-thumb-rail"
+                      :style="{ transform: `translate3d(${progressRatio * 100}%, 0, 0)` }"
+                    >
+                      <span class="scrub-thumb" />
+                    </div>
                   </div>
                   <div class="scrub-ruler-row mono">
                     <span>{{ fmtSec(displayedProgressSec) }}</span>
@@ -733,6 +767,8 @@ const playModeLabel = computed(() => {
 
 .vinyl-platter.is-spinning {
   animation-play-state: running;
+  will-change: transform;
+  backface-visibility: hidden;
 }
 
 @keyframes spin {
@@ -915,13 +951,24 @@ const playModeLabel = computed(() => {
 }
 
 .scrub-fill {
+  width: 100%;
   height: 100%;
   background: var(--cta-bg);
   border-radius: 999px;
+  transform-origin: left center;
+  will-change: transform;
+}
+
+.scrub-thumb-rail {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  will-change: transform;
 }
 
 .scrub-thumb {
   position: absolute;
+  left: 0;
   top: 50%;
   width: 11px;
   height: 11px;
@@ -1239,10 +1286,12 @@ const playModeLabel = computed(() => {
   align-items: center;
   gap: 11px;
   cursor: pointer;
+  contain: layout style;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 58px;
   transition:
     transform 0.16s var(--ease-spring),
-    border-color 0.16s ease,
-    background-color 0.16s ease;
+    border-color 0.16s ease;
 }
 
 .track-row:hover {

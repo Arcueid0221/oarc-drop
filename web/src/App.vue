@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import AudioEngine from './components/AudioEngine.vue'
 import HubView from './components/HubView.vue'
 import MusicView from './components/MusicView.vue'
@@ -87,7 +87,37 @@ function selectTab(tab: NavTab) {
 }
 
 function toggleTheme() {
-  applyTheme(theme.value === 'light' ? 'dark' : 'light')
+  const next: 'light' | 'dark' = theme.value === 'light' ? 'dark' : 'light'
+  const root = document.documentElement
+  const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+
+  root.classList.add('theme-switching')
+
+  const docWithVT = document as Document & {
+    startViewTransition?: (cb: () => void | Promise<void>) => { finished: Promise<void> }
+  }
+
+  if (typeof docWithVT.startViewTransition === 'function' && !reduceMotion) {
+    try {
+      const vt = docWithVT.startViewTransition(async () => {
+        applyTheme(next)
+        await nextTick()
+      })
+      void vt.finished.finally(() => {
+        root.classList.remove('theme-switching')
+      })
+      return
+    } catch {
+      // Fall back cleanly if a concurrent transition is active
+    }
+  }
+
+  applyTheme(next)
+  window.requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
+      root.classList.remove('theme-switching')
+    })
+  })
 }
 
 const shareCode = computed(() => {
@@ -754,6 +784,8 @@ onBeforeUnmount(() => {
 }
 .sbp-disc.is-spinning {
   animation: disc360 8s linear infinite;
+  will-change: transform;
+  backface-visibility: hidden;
 }
 @keyframes disc360 {
   to { transform: rotate(360deg); }
@@ -931,6 +963,9 @@ onBeforeUnmount(() => {
     min-height: 100dvh;
     border-radius: 0;
     border: 0;
+    background: transparent;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
     box-shadow: none;
     display: block;
     padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));
@@ -971,13 +1006,19 @@ onBeforeUnmount(() => {
       calc(14px + env(safe-area-inset-right, 0px))
       10px
       calc(14px + env(safe-area-inset-left, 0px));
-    background: var(--bg-window);
-    -webkit-backdrop-filter: blur(24px) saturate(185%);
-    backdrop-filter: blur(24px) saturate(185%);
+    background: rgba(246, 247, 250, 0.92);
+    -webkit-backdrop-filter: blur(12px) saturate(135%);
+    backdrop-filter: blur(12px) saturate(135%);
     border-bottom: 1px solid var(--border-hairline);
     flex-shrink: 0;
     user-select: none;
     -webkit-user-select: none;
+    transform: translateZ(0);
+    contain: layout style;
+  }
+
+  [data-theme="dark"] .mobile-topbar {
+    background: rgba(15, 16, 20, 0.92);
   }
 
   .m-up-pill {
@@ -1047,6 +1088,8 @@ onBeforeUnmount(() => {
     flex-direction: column;
     gap: 8px;
     pointer-events: none;
+    will-change: transform;
+    transform: translateZ(0);
     transition: transform 0.24s var(--ease-out-quart), opacity 0.18s ease;
     user-select: none;
     -webkit-user-select: none;

@@ -135,7 +135,40 @@ html, body {
   overscroll-behavior-y: none;
   letter-spacing: -0.014em;
   overflow-x: clip;
-  transition: background-color 0.35s ease, color 0.22s ease;
+}
+
+/* Atomic theme flip: freeze per-element transitions so View Transition blends two complete frames cleanly */
+html.theme-switching *,
+html.theme-switching *::before,
+html.theme-switching *::after {
+  transition: none !important;
+}
+
+::view-transition-old(root) {
+  animation: none;
+  mix-blend-mode: normal;
+  z-index: 1;
+}
+
+::view-transition-new(root) {
+  animation: oarc-vt-fade-in 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  mix-blend-mode: normal;
+  z-index: 2;
+}
+
+@keyframes oarc-vt-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ::view-transition-new(root) {
+    animation-duration: 1ms;
+  }
 }
 
 html.oarc-scroll-locked,
@@ -224,6 +257,59 @@ input, textarea {
   backdrop-filter: blur(28px) saturate(185%);
   border: 1px solid var(--border-strong);
   box-shadow: var(--shadow-popover), var(--specular-inset);
+}
+
+/* Mobile 120Hz High-Refresh GPU Fast Path (Android Skia & iOS ProMotion) */
+@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+  .frost-backdrop {
+    background-image: radial-gradient(85% 45% at 50% 0%, rgba(255, 255, 255, 0.72), transparent 70%);
+    background-size: 100% 100%;
+    transform: translateZ(0);
+  }
+
+  [data-theme="dark"] .frost-backdrop {
+    background-image: radial-gradient(80% 42% at 50% 0%, rgba(255, 255, 255, 0.03), transparent 70%);
+    background-size: 100% 100%;
+  }
+
+  /* Avoid full-screen mix-blend-mode compositing stall on Android Chrome while preserving subtle album tint */
+  .frost-cover-aura {
+    mix-blend-mode: normal;
+    background:
+      radial-gradient(36rem 28rem at 80% 16%, rgba(var(--cover-rgb), 0.13), transparent 68%),
+      radial-gradient(28rem 24rem at 20% 84%, rgba(var(--cover-rgb), 0.07), transparent 72%);
+    transform: translateZ(0);
+  }
+
+  [data-theme="dark"] .frost-cover-aura {
+    mix-blend-mode: normal;
+    background:
+      radial-gradient(36rem 28rem at 80% 16%, rgba(var(--cover-rgb), 0.14), transparent 70%);
+  }
+
+  /* Eliminate expensive per-card backdrop-filter on scrolling lists (96% solid surface looks nearly identical at 5x lower GPU cost) */
+  .glass-box {
+    background: rgba(255, 255, 255, 0.96);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+    box-shadow: 0 2px 10px -4px rgba(11, 13, 17, 0.07), var(--specular-inset);
+  }
+
+  [data-theme="dark"] .glass-box {
+    background: rgba(24, 26, 32, 0.96);
+    box-shadow: 0 4px 14px -6px rgba(0, 0, 0, 0.48), var(--specular-inset);
+  }
+
+  /* Lightweight 12px blur only on floating bars/sheets for smooth 120fps Android scrolling */
+  .liquid-chrome {
+    -webkit-backdrop-filter: blur(12px) saturate(135%);
+    backdrop-filter: blur(12px) saturate(135%);
+    box-shadow: 0 12px 30px -10px rgba(11, 13, 17, 0.18), var(--specular-inset);
+  }
+
+  [data-theme="dark"] .liquid-chrome {
+    box-shadow: 0 16px 36px -10px rgba(0, 0, 0, 0.72), var(--specular-inset);
+  }
 }
 
 /* Crisp Single-Line Instrument Header (zero verbose AI subtitles) */

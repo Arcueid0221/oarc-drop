@@ -67,6 +67,9 @@ go run ./cmd/demo
 
 ## 发布记录
 
+- **2026-11-19 v1.5.1（安卓 120Hz 高刷流畅度治理 · View Transitions 昼夜丝滑整屏淡入）**：
+  - **安卓高刷屏（120Hz）渲染快路径**：移动端移除外层 `.macos-window` `blur(34px)` 与滚动列表 `.glass-box` `blur(20px)` 嵌套毛玻璃（改为 `96%` 实底 + 镜面描边与轻阴影），顶/底栏与抽屉遮罩降为轻量 `blur(12px)` / `blur(6px)`，去掉移动端全屏 `mix-blend-mode` 与高频点阵底图；长列表卡片加 `contain` 与 `content-visibility: auto` 跳过屏外重绘；唱盘独立 GPU 合成层；音乐厅进度条拖动全面改走纯 GPU `transform: scaleX()` / `translate3d()` + `requestAnimationFrame` 合帧并缓存矩形防回流。
+  - **彻底消除昼夜切换黑白异步撕裂**：删除 `html, body` 慢速背景色渐变，切换主题时以 `html.theme-switching` 冻结所有散装过渡，并接入原生 View Transitions API（旧帧实底不动、新帧 220ms 柔和交叉淡入覆盖），彻底消除卡片与按钮各变各的割裂闪烁。
 - **2026-11-19 v1.5.0（iPhone Air & 安卓手机端深度全栈适配）**：
   - **PWA 壳层、状态栏与安卓防裁切图标**：修复浅色模式下 iPhone Air 主屏 PWA 状态栏白字隐身（补齐首帧防闪白脚本与 `color-scheme` 同步），禁止数字自动识别为电话链接；后端新增免登录 `/assets/icon-192.png` 与带 80% 安全区的 `/assets/icon-512-maskable.png`（适配安卓圆形/水滴自适应图标）；补齐 `interactive-widget=resizes-content`。
   - **软键盘避让与原生级触屏体验**：新增 `useMobileViewport` 监听 `visualViewport`，软键盘弹出时自动隐藏底栏、迷你播放器与多选坞，并向底部抽屉注入 iOS `--kb-inset` 防遮挡输入框；横屏（含 iPhone Air `912×420pt`）统一走移动端紧凑布局；校准底栏指示条偏移、增加角标/在线状态点与点击回顶；去除触屏灰块闪动、隔离桌面 `:hover` 防粘滞、弹窗锁定底层滚动防穿透。
