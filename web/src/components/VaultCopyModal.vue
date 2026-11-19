@@ -747,7 +747,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
   padding-top: 2px;
 }
 
-@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 720px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .vc-backdrop {
     display: flex;
     align-items: flex-end;
@@ -759,13 +759,13 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
   .vc-dialog {
     width: 100%;
-    max-height: calc(var(--vv-height, 100dvh) - 18px - env(safe-area-inset-top, 0px));
+    max-height: 85dvh;
     border-radius: 22px 22px 0 0;
     border-bottom: 0;
     padding:
       12px
       calc(16px + env(safe-area-inset-right, 0px))
-      calc(18px + env(safe-area-inset-bottom, 0px) + var(--kb-inset, 0px))
+      calc(18px + env(safe-area-inset-bottom, 0px))
       calc(16px + env(safe-area-inset-left, 0px));
   }
 

@@ -95,7 +95,7 @@ async function handleCopy() {
   transform: scale(0.94);
 }
 
-@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 860px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .copy-pill {
     height: 36px;
     padding: 0 13px;

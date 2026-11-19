@@ -2881,8 +2881,6 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   border: 1px solid var(--border-hairline);
   cursor: pointer;
   contain: layout style paint;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 180px;
   transition: transform 0.18s var(--ease-spring), border-color 0.18s ease;
 }
 
@@ -3067,8 +3065,6 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   justify-content: space-between;
   gap: 12px;
   contain: layout style;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 74px;
   transition: border-color 0.16s ease;
 }
 
@@ -3241,7 +3237,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   transform: translate(-50%, 14px) scale(0.96);
 }
 
-@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 860px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .vault-page.has-batch-dock {
     padding-bottom: 126px;
   }
@@ -3261,9 +3257,9 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   .batch-dock.is-above-player {
     bottom: calc(138px + env(safe-area-inset-bottom, 0px));
   }
-  :global(html[data-keyboard-open="1"]) .batch-dock {
-    transform: translateY(150%);
+  :global(body.oarc-kb-open) .batch-dock {
     opacity: 0;
+    visibility: hidden;
     pointer-events: none;
   }
   .bd-info {
@@ -3291,7 +3287,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
 }
 
 /* Mobile Responsive Polish (iPhone Air 420pt & Android 360–412px) */
-@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 720px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .vault-top-acts {
     width: 100%;
   }
@@ -3652,7 +3648,7 @@ function iconForKind(kind: string): 'disc' | 'video' | 'image' | 'file' {
   gap: 7px;
 }
 
-@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 720px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .modal-backdrop {
     -webkit-backdrop-filter: blur(6px);
     backdrop-filter: blur(6px);

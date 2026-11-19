@@ -67,6 +67,9 @@ go run ./cmd/demo
 
 ## 发布记录
 
+- **2026-11-19 v1.5.2（修复手机点击输入框白屏与一键剪贴板读取失败）**：
+  - **修复手机点击输入框白屏无法输入**：移除 `interactive-widget=resizes-content`、`visualViewport` 根样式变量改写、弹窗键盘双扣以及安卓 Chrome 弹键盘时易跳过绘制的 `content-visibility: auto`，横屏媒体查询补齐 `orientation: landscape`；软键盘弹出时仅对悬浮底栏做 `opacity/visibility` 隐藏，绝不触碰页面几何布局，同时完整保留 `v1.5.1` 的安卓 120Hz 去嵌套毛玻璃与纯 GPU 进度条优化。
+  - **修复移动端一键粘贴报剪贴板权限错误**：改为单次 `navigator.clipboard.read()` 内直接提取图片或 `text/plain`（避免二次调用 `readText()` 脱离用户手势被拒）；若浏览器安全策略本身禁用读取权限，自动聚焦输入框引导直接长按选「粘贴」（原生支持原图与文字）。
 - **2026-11-19 v1.5.1（安卓 120Hz 高刷流畅度治理 · View Transitions 昼夜丝滑整屏淡入）**：
   - **安卓高刷屏（120Hz）渲染快路径**：移动端移除外层 `.macos-window` `blur(34px)` 与滚动列表 `.glass-box` `blur(20px)` 嵌套毛玻璃（改为 `96%` 实底 + 镜面描边与轻阴影），顶/底栏与抽屉遮罩降为轻量 `blur(12px)` / `blur(6px)`，去掉移动端全屏 `mix-blend-mode` 与高频点阵底图；长列表卡片加 `contain` 与 `content-visibility: auto` 跳过屏外重绘；唱盘独立 GPU 合成层；音乐厅进度条拖动全面改走纯 GPU `transform: scaleX()` / `translate3d()` + `requestAnimationFrame` 合帧并缓存矩形防回流。
   - **彻底消除昼夜切换黑白异步撕裂**：删除 `html, body` 慢速背景色渐变，切换主题时以 `html.theme-switching` 冻结所有散装过渡，并接入原生 View Transitions API（旧帧实底不动、新帧 220ms 柔和交叉淡入覆盖），彻底消除卡片与按钮各变各的割裂闪烁。

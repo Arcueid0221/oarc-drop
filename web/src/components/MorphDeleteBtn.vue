@@ -280,7 +280,7 @@ onBeforeUnmount(() => {
     calc(18px + env(safe-area-inset-left, 0px));
 }
 
-@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 860px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .morph-trigger {
     width: 38px;
     height: 38px;

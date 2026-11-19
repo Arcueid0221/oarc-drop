@@ -944,7 +944,7 @@ onBeforeUnmount(() => {
   display: none;
 }
 
-@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 860px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .desktop-frame {
     height: auto;
     min-height: 100dvh;
@@ -953,7 +953,7 @@ onBeforeUnmount(() => {
   }
 
   .desktop-frame.is-music-locked {
-    height: var(--vv-height, 100dvh);
+    height: 100dvh;
     overflow: hidden;
   }
 
@@ -976,17 +976,11 @@ onBeforeUnmount(() => {
   }
 
   .desktop-frame.is-music-locked .macos-window {
-    height: var(--vv-height, 100dvh);
+    height: 100dvh;
     min-height: 0;
     display: flex;
     flex-direction: column;
     padding-bottom: calc(74px + env(safe-area-inset-bottom, 0px));
-  }
-
-  :global(html[data-keyboard-open="1"]) .macos-window,
-  :global(html[data-keyboard-open="1"]) .desktop-frame.has-mini-player .macos-window,
-  :global(html[data-keyboard-open="1"]) .desktop-frame.is-music-locked .macos-window {
-    padding-bottom: 8px;
   }
 
   .macos-sidebar {
@@ -1095,9 +1089,9 @@ onBeforeUnmount(() => {
     -webkit-user-select: none;
   }
 
-  :global(html[data-keyboard-open="1"]) .mobile-bottom-stack {
-    transform: translateY(145%);
+  :global(body.oarc-kb-open) .mobile-bottom-stack {
     opacity: 0;
+    visibility: hidden;
     pointer-events: none;
   }
 
@@ -1267,7 +1261,7 @@ onBeforeUnmount(() => {
   }
 }
 
-@media (max-height: 520px) and (pointer: coarse) {
+@media (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .mobile-topbar {
     padding-top: max(6px, env(safe-area-inset-top, 0px));
     padding-bottom: 6px;
@@ -1298,7 +1292,7 @@ onBeforeUnmount(() => {
   pointer-events: none;
 }
 
-@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 860px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .toast-anchor {
     top: calc(58px + env(safe-area-inset-top, 0px));
     left: calc(16px + env(safe-area-inset-left, 0px));

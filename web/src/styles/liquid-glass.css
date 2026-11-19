@@ -260,11 +260,10 @@ input, textarea {
 }
 
 /* Mobile 120Hz High-Refresh GPU Fast Path (Android Skia & iOS ProMotion) */
-@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 860px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .frost-backdrop {
     background-image: radial-gradient(85% 45% at 50% 0%, rgba(255, 255, 255, 0.72), transparent 70%);
     background-size: 100% 100%;
-    transform: translateZ(0);
   }
 
   [data-theme="dark"] .frost-backdrop {
@@ -278,7 +277,6 @@ input, textarea {
     background:
       radial-gradient(36rem 28rem at 80% 16%, rgba(var(--cover-rgb), 0.13), transparent 68%),
       radial-gradient(28rem 24rem at 20% 84%, rgba(var(--cover-rgb), 0.07), transparent 72%);
-    transform: translateZ(0);
   }
 
   [data-theme="dark"] .frost-cover-aura {
@@ -375,7 +373,7 @@ input, textarea {
   padding: 22px 24px 28px;
 }
 
-@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 860px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .pane-header {
     position: static;
     min-height: auto;
@@ -552,7 +550,7 @@ input, textarea {
   outline: none;
 }
 
-@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 860px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   input, textarea, select {
     font-size: 16px !important;
   }
@@ -588,7 +586,7 @@ input, textarea {
   display: none;
 }
 
-@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 720px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .sheet-grabber {
     display: block;
     width: 36px;

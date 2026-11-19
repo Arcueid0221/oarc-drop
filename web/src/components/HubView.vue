@@ -25,6 +25,7 @@ const sendState = ref<'idle' | 'loading' | 'success'>('idle')
 const dragDepth = ref(0)
 const isDragOver = computed(() => dragDepth.value > 0)
 const fileInput = ref<HTMLInputElement | null>(null)
+const pasteInputEl = ref<HTMLTextAreaElement | null>(null)
 const directDriveFolder = ref('')
 
 // Per-file async busy states (keyed by clip.id)
@@ -151,34 +152,63 @@ function handleComposerPaste(e: ClipboardEvent) {
 
 async function pasteFromSystemClipboard() {
   if (!navigator.clipboard) {
-    showToast('当前环境不支持读取剪贴板，请直接按 ⌘V 粘贴')
+    pasteInputEl.value?.focus()
+    showToast('当前浏览器不支持一键读剪贴板，请长按输入框选「粘贴」')
     return
   }
-  try {
-    if (navigator.clipboard.read) {
+
+  // 1. Single-gesture read(): read image OR text/plain from the SAME ClipboardItems batch
+  // (never call readText() after await read(), or iOS Safari / Android Chrome rejects due to expired user gesture!)
+  let readSupportedAndSucceeded = false
+  if (typeof navigator.clipboard.read === 'function') {
+    try {
       const items = await navigator.clipboard.read()
+      readSupportedAndSucceeded = true
       for (const item of items) {
         const imgType = item.types.find((t) => t.startsWith('image/'))
         if (imgType) {
           const blob = await item.getType(imgType)
           const ext = imgType.split('/')[1] || 'png'
-          const file = new File([blob], `image.${ext}`, {
-            type: imgType,
-          })
+          const file = new File([blob], `image.${ext}`, { type: imgType })
           dispatchFiles([file])
           return
         }
       }
-    }
-    const txt = await navigator.clipboard.readText()
-    if (txt && txt.trim()) {
-      await store.sendTextClip(txt)
+      for (const item of items) {
+        if (item.types.includes('text/plain')) {
+          const blob = await item.getType('text/plain')
+          const txt = await blob.text()
+          if (txt && txt.trim()) {
+            await store.sendTextClip(txt)
+            return
+          }
+        }
+      }
+      showToast('剪贴板为空')
       return
+    } catch {
+      // Fall through to readText() for browsers that block binary read() but allow readText()
     }
-    showToast('剪贴板为空')
-  } catch {
-    showToast('请允许剪贴板读取权限，或在粘贴框内长按粘贴')
   }
+
+  // 2. Fallback to readText() only if read() was unavailable or failed
+  if (!readSupportedAndSucceeded && typeof navigator.clipboard.readText === 'function') {
+    try {
+      const txt = await navigator.clipboard.readText()
+      if (txt && txt.trim()) {
+        await store.sendTextClip(txt)
+        return
+      }
+      showToast('剪贴板为空')
+      return
+    } catch {
+      // Permission blocked or unsupported in this browser / WebView
+    }
+  }
+
+  // 3. Universal zero-permission fallback: focus textarea so native OS long-press Paste works everywhere
+  pasteInputEl.value?.focus()
+  showToast('浏览器拦截了一键读取，请直接长按上方输入框选「粘贴」（原图与文字均支持）')
 }
 
 async function onPromoteToSilo(item: ClipItem) {
@@ -458,6 +488,7 @@ onBeforeUnmount(() => {
       <section class="glass-box paste-dock" :class="{ 'is-drag': isDragOver }">
         <div class="paste-well">
           <textarea
+            ref="pasteInputEl"
             v-model="draftText"
             rows="3"
             class="paste-input"
@@ -1223,8 +1254,6 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 10px;
   contain: layout style;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 132px;
 }
 
 .clip-card.is-pinned {
@@ -1544,7 +1573,7 @@ onBeforeUnmount(() => {
   border-radius: 7px;
 }
 
-@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 720px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .hub-head-acts {
     width: 100%;
     justify-content: space-between;

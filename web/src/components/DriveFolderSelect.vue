@@ -62,7 +62,7 @@ function updatePosition() {
   if (!btn) return
   const compact =
     window.innerWidth <= 720 ||
-    (window.innerHeight <= 520 && window.matchMedia('(pointer: coarse)').matches)
+    (window.matchMedia('(orientation: landscape) and (max-height: 520px) and (pointer: coarse)').matches)
   isMobileOverlay.value = compact
   if (compact) {
     menuStyle.value = {
@@ -414,7 +414,7 @@ onBeforeUnmount(() => {
   gap: 4px;
 }
 
-@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 720px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .drive-sel-btn {
     height: 36px;
     padding: 0 11px;
@@ -426,7 +426,7 @@ onBeforeUnmount(() => {
     gap: 6px;
   }
   .dp-list {
-    max-height: min(220px, calc(var(--vv-height, 100dvh) - 180px));
+    max-height: 220px;
   }
   .dp-item {
     min-height: 40px;

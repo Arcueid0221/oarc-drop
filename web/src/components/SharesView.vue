@@ -139,8 +139,6 @@ function storageLabel(st: string): string {
   align-items: center;
   gap: 12px;
   contain: layout style;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 84px;
 }
 
 .sh-info {
@@ -198,7 +196,7 @@ function storageLabel(st: string): string {
   flex-shrink: 0;
 }
 
-@media (max-width: 720px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 720px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .sh-card {
     flex-direction: column;
     align-items: stretch;

@@ -12,9 +12,8 @@ import type { MediaItem } from '../types'
 import UiIcon from './UiIcon.vue'
 
 const store = useDropStore()
-const { isKeyboardOpen } = useMobileViewport()
+useMobileViewport()
 const search = ref('')
-const searchFocused = ref(false)
 const lyricsExpanded = ref(false)
 const selectedPlaylistId = ref<number | 'all'>('all')
 const lyricsContainer = ref<HTMLElement | null>(null)
@@ -77,10 +76,6 @@ const displayTracks = computed(() =>
     track,
     info: parseTrackDisplayName(track, store.catalogTracks.value),
   })),
-)
-
-const isDeckCollapsedForSearch = computed(
-  () => isKeyboardOpen.value || (searchFocused.value && Boolean(search.value.trim())),
 )
 
 // Synchronously knows whether the active track carries lyrics (zero fetch flicker between two lyric songs!)
@@ -319,8 +314,6 @@ const playModeLabel = computed(() => {
               v-model="search"
               placeholder="搜索歌手、歌名…"
               enterkeyhint="search"
-              @focus="searchFocused = true"
-              @blur="searchFocused = false"
             />
             <button
               v-if="search"
@@ -348,7 +341,7 @@ const playModeLabel = computed(() => {
         </div>
       </header>
 
-      <div class="music-fixed-inner" :class="{ 'is-search-compact': isDeckCollapsedForSearch }">
+      <div class="music-fixed-inner">
         <!-- Unified Constant-Height Studio Deck (Lyrics fused inside, spring rebound on lyric <-> instrumental!) -->
         <section
           class="glass-box studio-deck"
@@ -1287,8 +1280,6 @@ const playModeLabel = computed(() => {
   gap: 11px;
   cursor: pointer;
   contain: layout style;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 58px;
   transition:
     transform 0.16s var(--ease-spring),
     border-color 0.16s ease;
@@ -1404,7 +1395,7 @@ const playModeLabel = computed(() => {
   border-color: var(--border-strong);
 }
 
-@media (max-width: 860px), (max-height: 520px) and (pointer: coarse) {
+@media (max-width: 860px), (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .music-header {
     padding: 8px 14px 6px;
   }
@@ -1426,11 +1417,6 @@ const playModeLabel = computed(() => {
   .music-fixed-inner {
     padding: 0 14px 8px;
     gap: 8px;
-  }
-
-  /* Collapse bulky turntable while keyboard/search is active so search results never vanish on Android/iPhone */
-  .music-fixed-inner.is-search-compact .studio-deck {
-    display: none;
   }
 
   .studio-deck {
@@ -1578,7 +1564,7 @@ const playModeLabel = computed(() => {
   }
 }
 
-@media (max-height: 520px) and (pointer: coarse) {
+@media (orientation: landscape) and (max-height: 520px) and (pointer: coarse) {
   .studio-deck {
     padding: 8px 11px;
   }
